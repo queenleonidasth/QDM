@@ -37,10 +37,13 @@ function Assert-QdmReleaseGates {
   }
 
   $qdmRecord=Read-QdmGate 'engine-acceptance.json' -RequireAfterHash
-  Assert-QdmGateCases $qdmRecord 'engine-acceptance.json' 34 -RequireCounters
+  Assert-QdmGateCases $qdmRecord 'engine-acceptance.json' 40 -RequireCounters
   if($qdmRecord.binaryUnchangedDuringRun -isnot [bool] -or !$qdmRecord.binaryUnchangedDuringRun){throw 'Engine acceptance did not certify an unchanged executable.'}
   if(@($qdmRecord.cases | Where-Object {$_.name -ceq 'resume-validation-is-visible-and-pause-all-keeps-one-owner'}).Count -ne 1){throw 'Engine acceptance is missing the resume-validation ownership regression.'}
-  Add-QdmVerifiedGate 'engine-acceptance.json' 34
+  foreach($qdmRateCase in @('per-download-speed-limit-is-enforced','queue-speed-limit-is-shared-across-concurrent-transfers','default-queue-limit-applies-to-unassigned-downloads','changing-an-active-per-download-limit-takes-effect-without-restart','pausing-one-queue-member-does-not-starve-another')){
+    if(@($qdmRecord.cases | Where-Object {$_.name -ceq $qdmRateCase}).Count -ne 1){throw ('Missing rate limit regression: '+$qdmRateCase)}
+  }
+  Add-QdmVerifiedGate 'engine-acceptance.json' 40
 
   $qdmRecord=Read-QdmGate 'bridge.json'
   Assert-QdmGateCases $qdmRecord 'bridge.json' 18 -RequireCounters
@@ -53,9 +56,10 @@ function Assert-QdmReleaseGates {
   Add-QdmVerifiedGate 'public-https.json' 2
 
   $qdmRecord=Read-QdmGate 'ui\slint-ui-acceptance.json'
-  Assert-QdmGateCases $qdmRecord 'ui\slint-ui-acceptance.json' 13 -Collection 'steps' -RequireCounters
+  Assert-QdmGateCases $qdmRecord 'ui\slint-ui-acceptance.json' 14 -Collection 'steps' -RequireCounters
   if($qdmRecord.status -cne 'passed'){throw 'Slint UI acceptance did not finish successfully.'}
-  Add-QdmVerifiedGate 'ui\slint-ui-acceptance.json' 13
+  if(@($qdmRecord.steps | Where-Object {$_.name -ceq 'Details sheet updates an active task queue and per-download budget'}).Count -ne 1){throw 'Slint UI acceptance is missing the transfer limits regression.'}
+  Add-QdmVerifiedGate 'ui\slint-ui-acceptance.json' 14
 
   $qdmRecord=Read-QdmGate 'zen-native.json'
   Assert-QdmGateCount $qdmRecord.failed 0 'zen-native.json failed'

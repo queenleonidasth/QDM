@@ -95,3 +95,10 @@ Add all six previously identified Prism advantages without sacrificing the nativ
 - Phase 2 remains open: telemetry still builds and diffs all visible-row models from full snapshots; 10k-job profiling is not complete.
 - Phase 4 clipboard watcher remains pending. Phase 5 queue entities, priorities, categories and restart/DST scheduling remain pending. Phase 6 platform split and protocol/media adapters remain pending.
 - All-six completion is **NOT** claimed. Keep release gates open until browser, GUI, checksum, pause/resume and platform evidence pass on one verified artifact.
+
+## Continuation evidence — 2026-11-02 — isolated release candidate
+- Built an isolated Windows release candidate, without modifying the installed program or production profile. QDM.exe SHA-256: `391ca22fc51fc8c29fbb50d9ea99b1a521ccdff82fbf360f44e15d06c698cd5d`.
+- On that candidate: Rust tests 38/38, HTTP engine acceptance 40/40, bridge 18/18, public HTTPS 2/2, Slint UI 14/14, isolated Zen 10/10, staged recovery 3/3, tail scheduling 3/3, and adaptive recovery passed. Reports were checked by all nine current automated release gates.
+- Updated release gates for the current 40 engine cases and 14 UI steps; regression tests passed 25/25. Updated packaging and NSIS version handling to use the package version and selected executable. Isolated packaging produced a portable ZIP and an installer, but neither has been published or installed.
+- **Not a full six-feature release:** the existing nine gates do not test real Chromium interception, Chromium native-host registration, 10k virtualization, clipboard detection, full queues/categories/scheduling, or optional protocol/platform adapters. Those features remain open. The installer and portable package have not had an independent clean-install smoke test, and the existing installer does not deploy or register QDMHost for browser auto-pairing.
+- Release artifacts and evidence are isolated under `C:\Users\QUEEN\AppData\Local\Temp\opencode\qdm-release-20261101-*`; no release artifact is certified for production installation or upload.

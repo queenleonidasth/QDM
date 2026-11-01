@@ -1,8 +1,17 @@
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
+!ifndef QDM_VERSION
+  !error "QDM_VERSION must be supplied by the verified packaging script"
+!endif
+!ifndef QDM_BINARY
+  !error "QDM_BINARY must be supplied by the verified packaging script"
+!endif
+!ifndef QDM_SETUP
+  !error "QDM_SETUP must be supplied by the verified packaging script"
+!endif
 Name "QDM — QUEEN Download Manager"
-OutFile "..\release\QDM-0.3.0-win-x64-setup.exe"
+OutFile "${QDM_SETUP}"
 InstallDir "$LOCALAPPDATA\Programs\QDM"
 InstallDirRegKey HKCU "Software\QUEEN\QDM" "InstallLocation"
 RequestExecutionLevel user
@@ -10,11 +19,11 @@ SetCompressor /SOLID lzma
 SetCompressorDictSize 16
 ShowInstDetails show
 ShowUninstDetails show
-VIProductVersion "0.3.0.0"
+VIProductVersion "${QDM_VERSION}.0"
 VIAddVersionKey "ProductName" "QDM — QUEEN Download Manager"
 VIAddVersionKey "FileDescription" "QDM native Windows installer"
-VIAddVersionKey "FileVersion" "0.3.0"
-VIAddVersionKey "ProductVersion" "0.3.0"
+VIAddVersionKey "FileVersion" "${QDM_VERSION}"
+VIAddVersionKey "ProductVersion" "${QDM_VERSION}"
 VIAddVersionKey "LegalCopyright" "QUEEN"
 !define MUI_ICON "..\resources\qdm.ico"
 !define MUI_UNICON "..\resources\qdm.ico"
@@ -52,7 +61,7 @@ qdm_abort:
   Abort
 qdm_install:
   SetOutPath "$INSTDIR"
-  File "..\target\release\QDM.exe"
+  File "${QDM_BINARY}"
   File "..\README.md"
   SetOutPath "$INSTDIR\extensions"
   File /r "..\extensions\*.*"
@@ -66,7 +75,7 @@ qdm_install:
   CreateShortCut "$SMPROGRAMS\QDM\Uninstall QDM.lnk" "$INSTDIR\Uninstall QDM.exe"
   WriteRegStr HKCU "Software\QUEEN\QDM" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QDM.Native" "DisplayName" "QDM — QUEEN Download Manager"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QDM.Native" "DisplayVersion" "0.3.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QDM.Native" "DisplayVersion" "${QDM_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QDM.Native" "Publisher" "QUEEN"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QDM.Native" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\QDM.Native" "DisplayIcon" "$INSTDIR\QDM.exe"

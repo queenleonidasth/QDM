@@ -30,9 +30,11 @@ function Reject-QdmTestFixture([string]$Name,[string]$Reason,[scriptblock]$Mutat
 }
 try {
   $qdmRecord=New-QdmPassingReport
-  $qdmRecord.cases=New-QdmPassingCases 34
+  $qdmRecord.cases=New-QdmPassingCases 40
   $qdmRecord.cases[0].name='resume-validation-is-visible-and-pause-all-keeps-one-owner'
-  $qdmRecord.passed=34;$qdmRecord.failed=0;$qdmRecord.binaryUnchangedDuringRun=$true
+  $rateNames=@('per-download-speed-limit-is-enforced','queue-speed-limit-is-shared-across-concurrent-transfers','default-queue-limit-applies-to-unassigned-downloads','changing-an-active-per-download-limit-takes-effect-without-restart','pausing-one-queue-member-does-not-starve-another')
+  for($i=0;$i -lt $rateNames.Count;$i++){$qdmRecord.cases[$i+1].name=$rateNames[$i]}
+  $qdmRecord.passed=40;$qdmRecord.failed=0;$qdmRecord.binaryUnchangedDuringRun=$true
   $qdmFixtures['engine-acceptance.json']=$qdmRecord | ConvertTo-Json -Depth 8
   $qdmRecord=New-QdmPassingReport
   $qdmRecord.cases=New-QdmPassingCases 18;$qdmRecord.passed=18;$qdmRecord.failed=0;$qdmRecord.skipped=0
@@ -41,7 +43,7 @@ try {
   $qdmRecord.cases=New-QdmPassingCases 2;$qdmRecord.passed=2;$qdmRecord.failed=0;$qdmRecord.ok=$true
   $qdmFixtures['public-https.json']=$qdmRecord | ConvertTo-Json -Depth 8
   $qdmRecord=New-QdmPassingReport
-  $qdmRecord.steps=New-QdmPassingCases 13;$qdmRecord.passed=13;$qdmRecord.failed=0;$qdmRecord.status='passed'
+  $qdmRecord.steps=New-QdmPassingCases 14;$qdmRecord.steps[0].name='Details sheet updates an active task queue and per-download budget';$qdmRecord.passed=14;$qdmRecord.failed=0;$qdmRecord.status='passed'
   $qdmFixtures['ui\slint-ui-acceptance.json']=$qdmRecord | ConvertTo-Json -Depth 8
   $qdmRecord=New-QdmPassingReport
   $qdmRecord.checks=@(1..10 | ForEach-Object {[pscustomobject]@{name=('check-'+$_);passed=$true}})
@@ -75,11 +77,13 @@ try {
   Reject-QdmTestFixture 'engine-acceptance.json' 'executable changed during test' {param($r) $r.binarySha256After='b'*64}
   Reject-QdmTestFixture 'engine-acceptance.json' 'false executable stability result' {param($r) $r.binaryUnchangedDuringRun=$false}
   Reject-QdmTestFixture 'engine-acceptance.json' 'missing resume ownership regression' {param($r) $r.cases[0].name='some-other-case'}
+  Reject-QdmTestFixture 'engine-acceptance.json' 'missing rate limit regression' {param($r) $r.cases[1].name='some-other-case'}
   Reject-QdmTestFixture 'bridge.json' 'partial bridge suite' {param($r) $r.cases=@($r.cases | Select-Object -First 17);$r.passed=17}
   Reject-QdmTestFixture 'bridge.json' 'skipped bridge case' {param($r) $r.skipped=1}
   Reject-QdmTestFixture 'public-https.json' 'unsuccessful public HTTPS cleanup' {param($r) $r.ok=$false}
   Reject-QdmTestFixture 'ui\slint-ui-acceptance.json' 'partial UI suite' {param($r) $r.steps=@($r.steps | Select-Object -First 12);$r.passed=12}
   Reject-QdmTestFixture 'ui\slint-ui-acceptance.json' 'unfinished UI report' {param($r) $r.status='running'}
+  Reject-QdmTestFixture 'ui\slint-ui-acceptance.json' 'missing transfer limits UI regression' {param($r) $r.steps[0].name='some-other-case'}
   Reject-QdmTestFixture 'zen-native.json' 'false Zen pass result' {param($r) $r.passed=$false}
   Reject-QdmTestFixture 'zen-native.json' 'failed Zen child check' {param($r) $r.checks[0].passed=$false}
   Reject-QdmTestFixture 'zen-native.json' 'partial Zen suite' {param($r) $r.checks=@($r.checks | Select-Object -First 9)}

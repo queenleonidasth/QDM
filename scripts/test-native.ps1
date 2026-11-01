@@ -1,4 +1,4 @@
-param([switch]$DebugBuild,[string]$ReportPath='docs\evidence\slint-idm-20261027\native-tests.json')
+param([switch]$DebugBuild,[string]$ReportPath='docs\evidence\slint-idm-20261027\native-tests.json',[string]$Binary='')
 $ErrorActionPreference = 'Stop'
 $qdmRoot = Split-Path -Parent $PSScriptRoot
 $qdmParent = Split-Path -Parent $qdmRoot
@@ -21,7 +21,7 @@ foreach ($qdmLine in $qdmEnvironment) {
 }
 Push-Location $qdmRoot
 try {
-  $qdmBinary=Join-Path $qdmRoot 'target\release\QDM.exe'
+  $qdmBinary=if($Binary){[IO.Path]::GetFullPath($Binary)}else{Join-Path $qdmRoot 'target\release\QDM.exe'}
   $qdmBeforeHash=(Get-FileHash -LiteralPath $qdmBinary -Algorithm SHA256).Hash.ToLowerInvariant()
   $qdmReportFull=[IO.Path]::GetFullPath($ReportPath)
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $qdmReportFull) | Out-Null
@@ -40,5 +40,4 @@ try {
   [ordered]@{schema=1;suite='Rust native protocol, ownership, rollback and history unit tests';status=$(if($qdmOk){'passed'}else{'failed'});startedAt=$qdmStarted;finishedAt=[DateTime]::UtcNow.ToString('o');binarySha256=$qdmBeforeHash;binarySha256After=$qdmAfterHash;exitCode=$qdmCode;totalTests=$(if($qdmMatch.Success){[int]$qdmMatch.Groups[1].Value}else{0});log=$qdmLog} | ConvertTo-Json | Set-Content -LiteralPath $qdmReportFull -Encoding UTF8
   if (!$qdmOk) { throw "QDM native tests failed: $qdmCode. See $qdmLog" }
 } finally { Pop-Location }
-
 
