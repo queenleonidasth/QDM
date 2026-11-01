@@ -1,7 +1,7 @@
 # QDM — Prism Six-Feature Implementation Plan
 Date: 2026-11-01 (Asia/Bangkok)
 Owner: QDM native Rust + Slint through QNECTOR
-Status: IMPLEMENTATION STARTED — phased, not six features delivered.
+Status: IMPLEMENTATION IN PROGRESS — QDM 0.4.0 released; six-feature plan remains incomplete.
 Project: C:\Users\QUEEN\Projects\QDM\native
 
 ## Goals and constraints
@@ -99,6 +99,16 @@ Add all six previously identified Prism advantages without sacrificing the nativ
 ## Continuation evidence — 2026-11-02 — isolated release candidate
 - Built an isolated Windows release candidate, without modifying the installed program or production profile. QDM.exe SHA-256: `391ca22fc51fc8c29fbb50d9ea99b1a521ccdff82fbf360f44e15d06c698cd5d`.
 - On that candidate: Rust tests 38/38, HTTP engine acceptance 40/40, bridge 18/18, public HTTPS 2/2, Slint UI 14/14, isolated Zen 10/10, staged recovery 3/3, tail scheduling 3/3, and adaptive recovery passed. Reports were checked by all nine current automated release gates.
-- Updated release gates for the current 40 engine cases and 14 UI steps; regression tests passed 25/25. Updated packaging and NSIS version handling to use the package version and selected executable. Isolated packaging produced a portable ZIP and an installer, but neither has been published or installed.
-- **Not a full six-feature release:** the existing nine gates do not test real Chromium interception, Chromium native-host registration, 10k virtualization, clipboard detection, full queues/categories/scheduling, or optional protocol/platform adapters. Those features remain open. The installer and portable package have not had an independent clean-install smoke test, and the existing installer does not deploy or register QDMHost for browser auto-pairing.
-- Release artifacts and evidence are isolated under `C:\Users\QUEEN\AppData\Local\Temp\opencode\qdm-release-20261101-*`; no release artifact is certified for production installation or upload.
+- Updated release gates for the current 40 engine cases and 14 UI steps; regression tests passed 25/25. Updated packaging and NSIS version handling to use the package version and selected executable. Published the portable ZIP and installer in GitHub release `v0.4.0`; installer clean-install smoke remains untested.
+- **Not a full six-feature release:** the existing nine gates do not test real Chromium interception, Chromium native-host registration, 10k virtualization, clipboard detection, full queues/categories/scheduling, or optional protocol/platform adapters. Those features remain open. The portable ZIP passed extraction, hash and version checks. The installer did not receive a clean-install smoke test and does not deploy or register QDMHost for browser auto-pairing.
+- Release artifacts and evidence were staged under `C:\Users\QUEEN\AppData\Local\Temp\opencode\qdm-release-20261101-*`. The public release exists, but installer is not certified for production replacement until clean-install and browser-host checks pass.
+
+## Current six-feature status — 2026-11-02
+1. **Browser capture parity — PARTIAL.** Zen/Firefox isolated acceptance passed 10/10. Chromium source exists, but native-host registration and real Chromium acceptance remain incomplete.
+2. **10k-list virtualization — NOT IMPLEMENTED.** UI still materializes and diffs full download lists; DPI, 10k-job, interaction and memory benchmarks remain.
+3. **Hierarchical speed limits — IMPLEMENTED AND TESTED.** Global, per-download, named/default queue budgets and active updates passed release-candidate tests. Maximum-worker fairness benchmarking remains.
+4. **Clipboard detection — NOT IMPLEMENTED.** Opt-in watcher and suggestion UI remain.
+5. **Queues, categories and scheduler — PARTIAL.** Queue assignment and speed budgets exist. Queue entities, priorities, categories, queue pause/resume and robust restart/DST scheduling remain.
+6. **Cross-platform and protocol/media modules — NOT IMPLEMENTED.** Platform separation, non-Windows UI proof and optional adapters remain.
+
+GitHub release: https://github.com/queenleonidasth/QDM/releases/tag/v0.4.0. Release passing the existing nine gates does not mean all six planned features are complete.
