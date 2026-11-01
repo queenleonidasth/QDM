@@ -1,0 +1,1002 @@
+import { ScrollView, ListView, TextEdit, Palette } from "std-widgets.slint";
+
+// Apple-inspired editorial dark: neutral surfaces and a single gold accent.
+// Every motion is driven by a user action or real transfer telemetry.
+export global Theme {
+    in-out property <bool> reduced-motion: false;
+    out property <color> bg: #101010;
+    out property <color> panel: #1d1d1f;
+    out property <color> raised: #272729;
+    out property <color> edge: #3a3a3c;
+    out property <color> gold: #e4c58e;
+    out property <color> ink: #f5f5f7;
+    out property <color> muted: #c7c7cc;
+    out property <color> faint: #a1a1a6;
+    out property <color> green: #b99762;
+    out property <color> danger: #e0a496;
+    out property <duration> quick: reduced-motion ? 0ms : 140ms;
+    out property <duration> smooth: reduced-motion ? 0ms : 260ms;
+    out property <duration> sheet: reduced-motion ? 0ms : 340ms;
+}
+
+export struct DownloadItem {
+    id: string, name: string, subtitle: string, status: string,
+    progress: float, progress-text: string,
+    active: bool, can-pause: bool, can-resume: bool, completed: bool, failed: bool, checked: bool, file-available: bool,
+    stage-visible: bool, stage-indeterminate: bool,
+    stage-progress: float, stage-text: string,
+}
+export struct LaneItem {
+    label: string, state: string, bytes-text: string, piece-text: string,
+    percent-text: string, progress: float, active: bool,
+}
+
+// Original, optically matched 24-unit line icons. No icon font or bitmap assets.
+component Glyph inherits Rectangle {
+    in property <string> kind;
+    in property <color> tint: Theme.ink;
+    width: 18px; height: 18px;
+    if root.kind == "download" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-cap: round; stroke-line-join: round;
+    }
+    if root.kind == "settings" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-cap: round;
+    }
+    if root.kind == "browser" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3c-5 5-5 13 0 18M12 3c5 5 5 13 0 18";
+        stroke: root.tint; stroke-width: 1.3px; stroke-line-cap: round;
+    }
+    if root.kind == "folder" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M3 7V5h6l3 3h9v12H3V7ZM3 10h18";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-join: round;
+    }
+    if root.kind == "file" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M5 3h9l5 5v13H5ZM14 3v6h5M8 13h8M8 17h5";
+        stroke: root.tint; stroke-width: 1.4px; stroke-line-cap: round; stroke-line-join: round;
+    }
+    if root.kind == "pause" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M8 5v14M16 5v14";
+        stroke: root.tint; stroke-width: 2.5px; stroke-line-cap: round;
+    }
+    if root.kind == "play" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M8 4l12 8-12 8Z";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-join: round;
+    }
+    if root.kind == "arrow" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M5 12h14m-6-6 6 6-6 6";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-cap: round; stroke-line-join: round;
+    }
+    if root.kind == "close" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M6 6l12 12M18 6 6 18";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-cap: round;
+    }
+    if root.kind == "link" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M10 8l3-3a4 4 0 0 1 6 6l-3 3M14 16l-3 3a4 4 0 0 1-6-6l3-3M8 16l8-8";
+        stroke: root.tint; stroke-width: 1.5px; stroke-line-cap: round;
+    }
+    if root.kind == "check" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M5 12l4 4L19 6";
+        stroke: root.tint; stroke-width: 1.7px; stroke-line-cap: round; stroke-line-join: round;
+    }
+    if root.kind == "shield" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3 4 6v6c0 4 4 7 8 9 4-2 8-5 8-9V6ZM8 12l3 3 5-6";
+        stroke: root.tint; stroke-width: 1.4px; stroke-line-cap: round; stroke-line-join: round;
+    }
+    if root.kind == "crown" : Path {
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M3 7l5 4 4-7 4 7 5-4-3 11H6ZM7 21h10";
+        stroke: root.tint; stroke-width: 1.3px; stroke-line-cap: round; stroke-line-join: round;
+    }
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <string> a11y-label: text;
+    in property <string> glyph;
+    in property <bool> primary: false;
+    in property <bool> subtle: false;
+    in property <bool> enabled: true;
+    in property <bool> compact: false;
+    callback clicked();
+    min-height: compact ? 29px : 37px;
+    preferred-height: compact ? 29px : 37px;
+    min-width: label.preferred-width + (glyph == "" ? 24px : 45px);
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: primary ? self.height / 2 : 8px;
+    border-width: 1px;
+    border-color: focus.has-focus ? Theme.gold : (primary ? #e5cea3 : (subtle ? transparent : #3a3a3c));
+    background: primary ? (hit.pressed ? #baa06f : (hit.has-hover ? #edd6ad : Theme.gold)) : (hit.pressed ? #34332d : (hit.has-hover ? #2c2d2a : (subtle ? transparent : #272729)));
+    opacity: enabled ? 1 : 0.35;
+    animate background, border-color { duration: Theme.quick; easing: ease-out; }
+    accessible-role: button;
+    accessible-label: a11y-label;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return { root.clicked(); accept } else { reject }
+        }
+    }
+    Rectangle {
+        y: hit.pressed ? 1.5px : 0px;
+        animate y { duration: Theme.quick; easing: ease-out; }
+        if root.glyph != "" : Glyph {
+            x: 12px; y: (parent.height - self.height) / 2;
+            width: 15px; height: 15px; kind: root.glyph;
+            tint: root.primary ? #282216 : (root.subtle ? Theme.muted : Theme.ink);
+        }
+        label := Text {
+            x: root.glyph == "" ? 10px : 34px;
+            width: parent.width - self.x - 10px; height: parent.height;
+            text: root.text; color: root.primary ? #282216 : (root.subtle ? Theme.muted : Theme.ink);
+            font-size: root.compact ? 13px : 14px;
+            font-weight: root.primary ? 600 : 400;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
+}
+
+component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 36px; height: 36px;
+    border-radius: 18px;
+    border-width: 1px;
+    border-color: focus.has-focus ? Theme.gold : (hit.has-hover ? #655c49 : #44443d);
+    background: hit.pressed ? #37362f : (hit.has-hover ? #292a25 : transparent);
+    opacity: enabled ? 1 : 0.4;
+    animate background, border-color { duration: Theme.quick; }
+    accessible-role: button; accessible-label: label; accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.clicked(); accept } else { reject } }
+    }
+    Glyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2 + (hit.pressed ? 1px : 0px);
+        kind: root.glyph; tint: hit.has-hover || focus.has-focus ? Theme.gold : Theme.muted;
+        animate y { duration: Theme.quick; }
+    }
+    hit := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
+}
+
+component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <string> label;
+    in property <bool> read-only: false;
+    in property <bool> enabled: true;
+    in property <bool> link-icon: false;
+    callback accepted();
+    min-height: 40px; preferred-height: 40px; vertical-stretch: 0;
+    border-radius: 8px; border-width: 1px;
+    border-color: input.has-focus ? #bba171 : #49483e;
+    background: input.has-focus ? #272729 : #272729;
+    animate border-color, background { duration: Theme.quick; }
+    forward-focus: input;
+    public function select-all() { input.select-all(); }
+    if root.link-icon : Glyph {
+        x: 13px; y: (parent.height - self.height) / 2;
+        kind: "link"; width: 16px; height: 16px;
+        tint: input.has-focus ? Theme.gold : Theme.faint;
+    }
+    Text {
+        x: root.link-icon ? 39px : 12px; width: parent.width - self.x - 12px; height: parent.height;
+        visible: root.text == "";
+        text: root.placeholder; color: Theme.faint; font-size: 12px;
+        vertical-alignment: center;
+    }
+    input := TextInput {
+        enabled: root.enabled;
+        x: root.link-icon ? 39px : 12px; width: parent.width - self.x - 12px; height: parent.height;
+        text <=> root.text; color: Theme.ink; font-size: 12px; vertical-alignment: center;
+        single-line: true; read-only: root.read-only;
+        selection-background-color: #75603b; selection-foreground-color: #ffffff;
+        accessible-role: text-input; accessible-label: root.label; accessible-value: root.text;
+        accessible-read-only: root.read-only;
+        accessible-action-set-value(value) => { if root.enabled && !root.read-only { root.text = value; } }
+        accepted => { root.accepted(); }
+    }
+}
+
+component GoldCheckBox inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    min-height: 24px; preferred-height: 24px;
+    accessible-role: checkbox; accessible-label: text; accessible-checked: checked;
+    accessible-action-default => { root.checked = !root.checked; }
+    forward-focus: focus;
+    focus := FocusScope {
+        key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.checked = !root.checked; accept } else { reject } }
+    }
+    Rectangle {
+        x: 0px; y: (parent.height - 18px) / 2; width: 18px; height: 18px;
+        border-radius: 4px; border-width: 1px;
+        border-color: focus.has-focus ? Theme.gold : (root.checked ? Theme.gold : Theme.faint);
+        background: root.checked ? Theme.gold : transparent;
+        if root.checked : Glyph { x: 2px; y: 2px; width: 14px; height: 14px; kind: "check"; tint: #1d1d1f; }
+    }
+    Text { x: 30px; width: parent.width - 30px; height: parent.height; text: root.text; color: Theme.ink; font-size: 13px; vertical-alignment: center; }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.checked = !root.checked; } }
+}
+
+component RemoveChoice inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback chosen();
+    min-height: 24px; preferred-height: 24px;
+    accessible-role: checkbox; accessible-label: text; accessible-checked: selected;
+    accessible-action-default => { root.chosen(); }
+    forward-focus: focus;
+    focus := FocusScope { key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.chosen(); accept } else { reject } } }
+    Rectangle { x: 0px; y: 3px; width: 18px; height: 18px; border-radius: 9px; border-width: 1px; border-color: root.selected || focus.has-focus ? Theme.gold : Theme.faint; background: root.selected ? Theme.gold : transparent; }
+    Text { x: 30px; width: parent.width - 30px; height: parent.height; text: root.text; color: Theme.ink; font-size: 13px; vertical-alignment: center; }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.chosen(); } }
+}
+
+component Meter inherits Rectangle {
+    in property <float> progress;
+    in property <color> tint: Theme.green;
+    in property <string> label: "Download progress";
+    in property <bool> animate-progress: true;
+    height: 4px; border-radius: 2px; background: #383c35;
+    accessible-role: progress-indicator; accessible-label: label;
+    accessible-value: round(progress * 100) + "%";
+    accessible-value-minimum: 0; accessible-value-maximum: 100;
+    Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width * max(0, min(1, root.progress)); height: parent.height;
+        border-radius: parent.border-radius; background: root.tint;
+        animate width { duration: root.animate-progress ? Theme.smooth : 0ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    }
+}
+
+component Sheet inherits Rectangle {
+    in property <bool> opened;
+    in property <length> surface-width;
+    in property <length> surface-height;
+    width: min(surface-width - 28px, 640px); x: (surface-width - self.width) / 2;
+    y: max(14px, (surface-height - self.height) / 2) + (opened ? 0px : 28px);
+    opacity: opened ? 1 : 0;
+    visible: opened || self.opacity > 0;
+    background: Theme.panel; border-width: 1px; border-color: Theme.edge; border-radius: 18px;
+    animate y { duration: Theme.sheet; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+    animate opacity { duration: Theme.quick; easing: ease-out; }
+
+    // Prevent clicks on empty panel space from reaching the modal backdrop.
+    TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; }
+    @children
+}
+
+component LaneTile inherits Rectangle {
+    in property <LaneItem> item;
+    background: hover.has-hover ? #30372c : (item.active ? #25332a : #252923);
+    border-color: item.active ? #486b53 : #3d493c;
+    border-width: 1px; border-radius: 8px;
+    animate background, border-color { duration: Theme.quick; }
+    accessible-role: groupbox;
+    accessible-label: item.label + " " + item.state + ", " + item.bytes-text + ", " + item.percent-text;
+    VerticalLayout {
+        padding: 10px; spacing: 5px;
+        HorizontalLayout {
+            Text { text: root.item.label; color: Theme.ink; font-size: 13px; font-weight: 600; }
+            Text { text: root.item.state; color: root.item.active ? Theme.green : Theme.muted; font-size: 12px; horizontal-alignment: right; }
+        }
+        HorizontalLayout {
+            Text { text: root.item.bytes-text; color: Theme.ink; font-size: 13px; }
+            Text { text: root.item.percent-text; color: Theme.muted; font-size: 12px; horizontal-alignment: right; }
+        }
+        Meter { progress: root.item.progress; label: root.item.label + " progress"; tint: root.item.active ? Theme.green : #b99762; height: 3px; }
+    }
+    hover := TouchArea { }
+}
+
+export component QdmTray inherits SystemTrayIcon {
+    in property <string> status: "QDM — QUEEN Download Manager";
+    callback restore(); callback pause-all(); callback resume-all(); callback quit();
+    icon: @image-url("../resources/qdm-crown.svg"); tooltip: status; title: "QDM";
+    clicked => { restore(); }
+    Menu {
+        MenuItem { title: "Open QDM"; activated => { root.restore(); } }
+        MenuItem { title: "Pause all downloads"; activated => { root.pause-all(); } }
+        MenuItem { title: "Resume all downloads"; activated => { root.resume-all(); } }
+        MenuItem { title: "Exit QDM"; activated => { root.quit(); } }
+    }
+}
+
+export component QdmWindow inherits Window {
+    title: "QDM " + root.version-label + " - QUEEN Download Manager";
+    preferred-width: 480px; preferred-height: 900px;
+    min-width: 480px; min-height: 820px;
+    background: Theme.bg; default-font-family: "Segoe UI Variable"; default-font-size: 13px;
+    icon: @image-url("../resources/qdm-crown.svg");
+    forward-focus: url-entry;
+    in property <[DownloadItem]> downloads;
+    in property <[LaneItem]> lanes;
+    in-out property <string> selected-id;
+    in-out property <string> url;
+    in property <string> aggregate-speed: "0 B/s";
+    in property <string> speed-path: "";
+    in property <string> active-label: "0";
+    in property <bool> transfer-active: false;
+    in property <int> checked-count: 0;
+    in-out property <bool> bulk-remove: false;
+    in-out property <string> remove-target-id;
+    in-out property <string> remove-target-name;
+    in property <string> completed-label: "0";
+    in property <string> total-label: "0";
+    in property <string> connection-label: "32";
+    in property <string> download-directory;
+    in property <string> selected-name: "Ready for your next download";
+    in property <string> selected-host: "Add a link above to get started.";
+    in property <string> selected-status: "READY";
+    in-out property <string> selected-queue;
+    in-out property <string> selected-download-speed: "0";
+    in property <string> selected-bytes: "0 B / —";
+    in property <string> selected-speed: "—";
+    in property <string> selected-eta: "—";
+    in property <string> selected-connections: "0 / 32";
+    in property <string> selected-percent: "0%";
+    in property <float> selected-progress: 0;
+    in property <string> selected-notice;
+    in property <string> stage-label;
+    in property <string> stage-bytes;
+    in property <float> stage-progress;
+    in property <bool> stage-visible: false;
+    in property <bool> stage-indeterminate: false;
+    in property <bool> can-pause: false;
+    in property <bool> can-resume: false;
+    in property <bool> can-open: false;
+    in property <bool> has-selection: false;
+    in property <string> lane-summary: "Worker activity appears here while downloading";
+    in property <string> lane-note: "Each tile is one connection. Workers can receive several pieces.";
+    in property <string> integrity-label: "No file selected";
+    in property <string> sha256;
+    in property <string> toast;
+    in property <bool> toast-error: false;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> advanced-open: false;
+    in-out property <bool> refresh-open: false;
+    in-out property <bool> integration-open: false;
+    in-out property <bool> remove-open: false;
+    in-out property <bool> delete-local-files: false;
+    in-out property <bool> reduced-motion <=> Theme.reduced-motion;
+    in-out property <string> setting-connections: "32";
+    in-out property <string> setting-concurrent: "2";
+    in-out property <string> setting-speed: "0";
+    in-out property <string> setting-retries: "3";
+    in-out property <string> setting-directory;
+    in-out property <string> setting-queue-limits;
+    in-out property <bool> setting-tray: true;
+    in-out property <string> batch-urls;
+    in-out property <string> batch-queue;
+    in-out property <string> batch-speed-limit: "0";
+    in-out property <string> expected-hash;
+    in-out property <bool> start-now: true;
+    in-out property <string> replacement-url;
+    in-out property <string> bridge-port;
+    in-out property <string> bridge-token;
+    in-out property <string> extension-path;
+    in-out property <int> filter-index: 0;
+    in property <string> version-label: "";
+    callback add-url();
+    callback add-batch();
+    callback select-download(string);
+    callback toggle-checked(string);
+    callback clear-checked();
+    callback select-all-visible();
+    callback context-download(string);
+    callback remove-checked();
+    callback open-download(string);
+    callback filter-changed(int);
+    callback pause-selected();
+    callback resume-selected();
+    callback pause-download(string);
+    callback resume-download(string);
+    callback remove-selected();
+    callback open-selected();
+    callback reveal-selected();
+    callback refresh-selected();
+    callback pause-all();
+    callback resume-all();
+    callback open-folder();
+    callback open-settings();
+    callback scroll-downloads-to-top();
+    callback save-settings();
+    callback update-download-limits();
+    callback open-integration();
+    callback copy-token();
+    callback open-extension();
+    callback dismiss-toast();
+    callback quit();
+    public function use-dark-palette() { Palette.color-scheme = ColorScheme.dark; }
+
+    in-out property <bool> details-open: false;
+    property <bool> panel-open: settings-open || advanced-open || refresh-open || integration-open || remove-open || details-open;
+
+    function activate-sheet(which: int) {
+        if which != 1 { root.settings-open = false; }
+        if which != 2 { root.advanced-open = false; }
+        if which != 3 { root.refresh-open = false; }
+        if which != 4 { root.integration-open = false; }
+        if which != 5 { root.remove-open = false; }
+        if which != 6 { root.details-open = false; }
+    }
+    changed settings-open => { if root.settings-open { root.activate-sheet(1); settings-first.focus(); } }
+    changed advanced-open => { if root.advanced-open { root.activate-sheet(2); batch-first.focus(); } }
+    changed refresh-open => { if root.refresh-open { root.activate-sheet(3); refresh-first.focus(); } }
+    changed integration-open => { if root.integration-open { root.activate-sheet(4); integration-first.focus(); } }
+    changed remove-open => { root.delete-local-files = false; if root.remove-open { root.activate-sheet(5); remove-first.focus(); } }
+    changed details-open => { if root.details-open { root.activate-sheet(6); details-first.focus(); } }
+    changed panel-open => { if !root.panel-open { url-entry.focus(); } }
+    // Called only when the engine publishes a previously unseen download ID.
+    // Keep the users scroll position intact during ordinary telemetry updates.
+    scroll-downloads-to-top => { list.content-y = 0px; }
+
+    keyboard := FocusScope {
+        width: root.width; height: root.height;
+        focus-on-tab-navigation: false;
+        focus-on-click: false;
+        capture-key-pressed(event) => {
+            if event.modifiers.control && (event.text == "l" || event.text == "L") {
+                root.activate-sheet(0); url-entry.focus(); url-entry.select-all(); accept
+            } else if event.text == Key.Escape {
+                root.activate-sheet(0); url-entry.focus(); accept
+            } else { reject }
+        }
+        Rectangle {
+            width: root.width; height: root.height;
+            background: Theme.bg;
+            VerticalLayout {
+            x: max(0px, (root.width - 980px) / 2); y: 0px;
+            width: min(root.width, 980px); height: parent.height;
+            padding-left: 24px; padding-right: 24px; padding-top: 16px; padding-bottom: 12px; spacing: 0px;
+            // Command bar and transfer workspace.
+            HorizontalLayout {
+                height: 44px; spacing: 10px;
+                Rectangle {
+                    width: root.width < 600px ? max(0px, root.width - 196px) : 245px; height: 44px;
+                    Text { x: 0px; y: 1px; width: parent.width; height: 24px; text: "QUEEN"; font-family: "Segoe UI Variable"; font-size: 19px; font-weight: 600; letter-spacing: 0.5px; vertical-alignment: center; color: #e9cc92; }
+                    Text { x: 0px; y: 25px; width: parent.width; height: 15px; text: "DOWNLOAD MANAGER"; font-family: "Segoe UI Variable"; font-size: 10px; font-weight: 600; letter-spacing: 0.7px; vertical-alignment: center; color: #c4b9a8; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                IconButton {
+                    enabled: !root.panel-open; glyph: "folder"; label: "Open download folder";
+                    clicked => { root.open-folder(); }
+                }
+                IconButton { enabled: !root.panel-open; glyph: "browser"; label: "Browser connection"; clicked => { root.open-integration(); } }
+                IconButton { enabled: !root.panel-open; glyph: "settings"; label: "Settings"; clicked => { root.open-settings(); } }
+                if root.width >= 600px : Rectangle {
+                    width: 75px; height: 26px; border-radius: 13px; border-width: 1px;
+                    background: root.active-label != "0" ? #322c20 : #23231f;
+                    border-color: root.active-label != "0" ? #786541 : #534c3c;
+                    // Optically center dot and label in both axes, without layout drift.
+                    Rectangle {
+                        x: root.active-label != "0" ? 20px : 17px;
+                        y: (parent.height - 6px) / 2;
+                        width: 6px; height: 6px; border-radius: 3px;
+                        background: Theme.gold;
+                    }
+                    Text {
+                        x: root.active-label != "0" ? 33px : 30px;
+                        y: 0px; width: 40px; height: parent.height;
+                        text: root.active-label != "0" ? "LIVE" : "READY";
+                        color: Theme.gold; font-family: "Segoe UI Variable";
+                        font-size: 12px; font-weight: 650;
+                        vertical-alignment: center; horizontal-alignment: left;
+                    }
+                }
+            }
+            Rectangle { height: 14px; }
+            // Compact link entry keeps the queue in the foreground.
+            HorizontalLayout {
+                height: 38px; spacing: 8px;
+                url-entry := TextField { enabled: !root.panel-open;
+                    text <=> root.url; label: "Download URL"; placeholder: "Paste a download link";
+                    link-icon: true; horizontal-stretch: 1; min-height: 38px; preferred-height: 38px;
+                    accepted => { root.add-url(); }
+                }
+                ActionButton { enabled: !root.panel-open; text: "Download"; glyph: "download"; width: 118px; height: 38px; clicked => { root.add-url(); } }
+            }
+            Rectangle { height: 14px; }
+            // Compact, real transfer telemetry leaves the queue as the primary surface.
+            Rectangle {
+                height: root.transfer-active ? (root.stage-visible ? 172px : 135px) : 0px;
+                clip: true;
+                background: Theme.panel; border-width: 1px; border-color: Theme.edge; border-radius: 11px;
+                animate height { duration: Theme.reduced-motion ? 0ms : 210ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                Text { x: 14px; y: 10px; text: "FILE TRANSFER RATE"; color: Theme.muted; font-size: 11px; letter-spacing: 0.5px; }
+                Text { x: 14px; y: 26px; text: root.has-selection ? root.selected-speed : root.aggregate-speed; color: Theme.ink; font-size: 18px; }
+                Rectangle { x: 145px; y: 24px; width: parent.width - 159px; height: 1px; background: #323b40; }
+                Rectangle { x: 145px; y: 44px; width: parent.width - 159px; height: 1px; background: #323b40; }
+                Path { x: 145px; y: 10px; width: parent.width - 159px; height: 35px; viewbox-width: 100; viewbox-height: 35; fit: fill; commands: root.speed-path; stroke: Theme.gold; stroke-width: 2px; stroke-line-cap: round; stroke-line-join: round; }
+                Rectangle { x: 14px; y: 53px; width: parent.width - 28px; height: 1px; background: Theme.edge; }
+                if root.has-selection : Rectangle {
+                    x: 14px; y: 60px; width: parent.width - 28px; height: 68px;
+                    Text { x: 0px; y: 0px; width: parent.width - 240px; height: 17px; text: root.selected-name; color: Theme.ink; font-size: 12px; font-weight: 600; overflow: elide; }
+                    Text { x: parent.width - 100px; y: 0px; width: 100px; height: 17px; text: root.selected-percent; color: Theme.gold; horizontal-alignment: right; font-size: 12px; }
+                    if root.selected-status != "Complete" : Meter { x: 0px; y: 21px; width: parent.width; height: 3px; progress: root.selected-progress; }
+                    Text { x: 0px; y: 37px; width: parent.width - 170px; height: 25px; text: root.selected-status + "  ·  " + root.selected-bytes; color: Theme.muted; font-size: 12px; overflow: elide; vertical-alignment: center; }
+                    ActionButton { x: parent.width - 165px; y: 35px; width: 90px; height: 29px; text: root.can-open ? "Open" : (root.can-resume ? "Resume" : "Pause"); compact: true; enabled: !root.panel-open && (root.can-pause || root.can-resume || root.can-open); clicked => { if root.can-open { root.open-selected(); } else if root.can-resume { root.resume-selected(); } else { root.pause-selected(); } } }
+                    ActionButton { x: parent.width - 70px; y: 35px; width: 70px; height: 29px; text: "Details"; compact: true; subtle: true; enabled: !root.panel-open; clicked => { root.details-open = true; } }
+                }
+                if root.has-selection && root.stage-visible : Rectangle {
+                    x: 14px; y: 132px; width: parent.width - 28px; height: 32px;
+                    accessible-role: groupbox;
+                    accessible-label: root.stage-indeterminate ? "File verification in progress" : "File assembly progress";
+                    Text {
+                        x: 0px; y: 0px; height: 13px; width: 128px;
+                        text: root.stage-label; color: Theme.gold; font-size: 12px; font-weight: 650;
+                    }
+                    Text {
+                        x: 120px; y: 0px; height: 13px; width: parent.width - 120px;
+                        text: root.stage-bytes; color: Theme.muted; font-size: 12px;
+                        horizontal-alignment: right; overflow: elide;
+                    }
+                    if !root.stage-indeterminate : Meter {
+                        x: 0px; y: 21px; width: parent.width; height: 4px;
+                        progress: root.stage-progress; tint: Theme.gold;
+                        label: "Verifying directly written file";
+                    }
+                    if root.stage-indeterminate : Rectangle {
+                        x: 0px; y: 21px; width: parent.width; height: 3px; background: Theme.edge;
+                        // Distinct indeterminate state. No fake percentage or simulated progress.
+                        Rectangle { x: 0px; y: 0px; width: 42px; height: parent.height; background: Theme.gold; }
+                    }
+                }
+                if !root.has-selection : Text { x: 14px; y: 70px; text: "Select a download to see its progress."; color: Theme.muted; font-size: 13px; }
+            }
+            Rectangle { height: root.transfer-active ? 12px : 0px; animate height { duration: Theme.reduced-motion ? 0ms : 210ms; } }
+            // The queue uses rows and quiet separators, not nested cards.
+            VerticalLayout {
+                min-height: 200px;
+                vertical-stretch: 1; spacing: 0px;
+                HorizontalLayout {
+                    height: 31px;
+                    Text { text: "Downloads"; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 18px; font-weight: 650; }
+                    Text { text: "  /  " + root.total-label; color: Theme.faint; font-size: 12px; }
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton { enabled: !root.panel-open; text: "Pause all"; compact: true; subtle: true; clicked => { root.pause-all(); } }
+                    ActionButton { enabled: !root.panel-open; text: "Resume all"; compact: true; subtle: true; clicked => { root.resume-all(); } }
+                }
+                Rectangle {
+                    height: 35px;
+                    Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #353932; }
+                    Rectangle {
+                        x: root.filter-index * 84px + 9px; y: parent.height - 2px;
+                        width: 54px; height: 2px; background: Theme.gold; border-radius: 1px;
+                        animate x { duration: Theme.smooth; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                    }
+                    for label[index] in ["All", "Active", "Finished"] : Rectangle {
+                        x: index * 84px; width: 72px; height: 32px;
+                        accessible-role: button; accessible-enabled: !root.panel-open; accessible-label: label + " downloads";
+                        accessible-action-default => { if !root.panel-open { root.filter-index = index; root.filter-changed(index); } }
+                        tab-focus := FocusScope {
+                            enabled: !root.panel-open;
+                            key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.filter-index = index; root.filter-changed(index); accept } else { reject } }
+                        }
+                        Text {
+                            x: 0px; y: 0px; width: parent.width; height: parent.height; horizontal-alignment: center;
+                            text: label; color: root.filter-index == index ? Theme.gold : (tab-hit.has-hover ? Theme.ink : Theme.muted);
+                            font-size: 13px; font-weight: root.filter-index == index ? 600 : 400; vertical-alignment: center;
+                            animate color { duration: Theme.quick; }
+                        }
+                        Rectangle { visible: tab-focus.has-focus; x: 0px; y: 3px; width: parent.width; height: 25px; border-radius: 4px; border-width: 1px; border-color: Theme.gold; }
+                        tab-hit := TouchArea { enabled: !root.panel-open; mouse-cursor: pointer; clicked => { tab-focus.focus(); root.filter-index = index; root.filter-changed(index); } }
+                    }
+                    Text { x: parent.width - 148px; width: 148px; height: 32px; text: root.active-label + " active  ·  " + root.aggregate-speed; color: Theme.faint; font-size: 12px; horizontal-alignment: right; vertical-alignment: center; }
+                }
+                // Stable single-row selection toolbar: balanced controls without vertical layout shift.
+                HorizontalLayout {
+                    height: 32px; spacing: 7px;
+                    Text {
+                        text: root.checked-count + " selected";
+                        color: root.checked-count > 0 ? Theme.gold : Theme.muted;
+                        font-size: 12px; vertical-alignment: center; horizontal-stretch: 1;
+                    }
+                    if root.checked-count == 0 : ActionButton {
+                        text: "Select all"; a11y-label: "Select all visible downloads";
+                        compact: true; subtle: true; width: 80px; height: 28px;
+                        enabled: !root.panel-open; clicked => { root.select-all-visible(); }
+                    }
+                    if root.checked-count > 0 : ActionButton {
+                        text: "Clear"; a11y-label: "Clear selected downloads";
+                        compact: true; subtle: true; width: 60px; height: 28px;
+                        enabled: !root.panel-open; clicked => { root.clear-checked(); }
+                    }
+                    if root.checked-count > 0 : ActionButton {
+                        text: "Remove"; a11y-label: "Remove selected downloads from list";
+                        compact: true; width: 76px; height: 28px;
+                        enabled: !root.panel-open; clicked => { root.bulk-remove = true; root.remove-open = true; }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1; min-height: 16px;
+                    list := ListView {
+                        visible: root.downloads.length > 0;
+                        for job[index] in root.downloads : Rectangle {
+                            height: job.stage-visible ? 124px : (job.completed ? 66px : 91px);
+                            background: root.selected-id == job.id ? #302c25 : (row-hit.has-hover ? #25292a : transparent);
+                            animate background { duration: Theme.quick; }
+                            accessible-role: list-item; accessible-enabled: !root.panel-open;
+                            accessible-label: job.name + ", " + job.status;
+                            accessible-item-selectable: true; accessible-item-selected: root.selected-id == job.id;
+                            accessible-item-index: index; accessible-action-default => { if !root.panel-open { root.select-download(job.id); } }
+                            row-focus := FocusScope {
+                                enabled: !root.panel-open;
+                                key-pressed(event) => {
+                                    if event.text == Key.Return { root.select-download(job.id); accept }
+                                    else if event.text == " " { root.select-download(job.id); if job.can-pause { root.pause-download(job.id); } else if job.can-resume { root.resume-download(job.id); } accept }
+                                    else { reject }
+                                }
+                            }
+                            Rectangle {
+                                x: 0px; y: 6px; width: 2px;
+                                height: root.selected-id == job.id ? parent.height - 12px : 0px;
+                                background: Theme.gold; border-radius: 1px;
+                                animate height { duration: Theme.smooth; easing: ease-out; }
+                            }
+                            Rectangle { visible: row-focus.has-focus && root.selected-id == job.id; x: 3px; y: 2px; width: parent.width - 7px; height: parent.height - 4px; border-width: 1px; border-color: Theme.gold; border-radius: 5px; }
+                            if !job.completed : Glyph { x: 10px; y: 14px; width: 18px; height: 18px; kind: "file"; tint: job.failed ? Theme.danger : Theme.gold; }
+                            Text { x: 38px; y: 7px; width: parent.width - 115px; height: 17px; text: job.name; color: Theme.ink; font-size: 14px; font-weight: 600; overflow: elide; }
+                            Text { x: parent.width - 72px; y: 8px; width: 62px; height: 16px; text: job.progress-text; color: job.failed ? Theme.danger : Theme.muted; font-size: 12px; horizontal-alignment: right; overflow: elide; }
+                            Text { x: 38px; y: 25px; width: parent.width - 48px; height: 17px; text: job.subtitle; color: Theme.faint; font-size: 12px; overflow: elide; }
+                            Text { x: 38px; y: 44px; width: 104px; height: 17px; text: job.status; color: job.failed ? Theme.danger : (job.completed ? Theme.green : Theme.muted); font-size: 12px; font-weight: 550; overflow: elide; }
+                            if !job.completed : Meter {
+                                x: 38px; y: 79px; width: parent.width - 48px; height: 3px;
+                                progress: job.progress; animate-progress: true;
+                                tint: job.failed ? Theme.danger : (job.completed ? #b99762 : Theme.gold);
+                                label: job.name + " download progress";
+                            }
+                            if job.stage-visible : Text {
+                                x: 38px; y: 91px; width: 121px; height: 16px;
+                                text: job.stage-text; font-size: 12px; color: Theme.gold; overflow: elide;
+                            }
+                            if job.stage-visible && !job.stage-indeterminate : Meter {
+                                x: 160px; y: 113px; width: parent.width - 170px; height: 3px;
+                                progress: job.stage-progress; tint: Theme.gold;
+                                label: job.name + " file assembly progress";
+                            }
+                            if job.stage-visible && job.stage-indeterminate : Rectangle {
+                                x: 160px; y: 113px; width: parent.width - 170px; height: 3px; background: Theme.edge;
+                                Rectangle { width: 38px; height: parent.height; background: Theme.gold; }
+                            }
+                            Rectangle { y: parent.height - 1px; x: 38px; width: parent.width - 38px; height: 1px; background: #30362d; }
+                            row-hit := TouchArea { enabled: !root.panel-open; mouse-cursor: pointer; pointer-event(event) => { if event.button == PointerEventButton.right && event.kind == PointerEventKind.down { root.context-download(job.id); } } clicked => { row-focus.focus(); root.select-download(job.id); } }
+                            if job.completed : Rectangle {
+                                x: 8px; y: 10px; width: 24px; height: 26px;
+                                accessible-role: checkbox; accessible-label: "Select " + job.name; accessible-checked: job.checked;
+                                accessible-action-default => { if !root.panel-open { root.toggle-checked(job.id); } }
+                                check-focus := FocusScope { enabled: !root.panel-open; key-pressed(event) => { if event.text == " " || event.text == Key.Return { root.toggle-checked(job.id); accept } else { reject } } }
+                                Rectangle { x: 2px; y: 4px; width: 18px; height: 18px; border-radius: 4px; border-width: 1px; border-color: check-focus.has-focus || job.checked ? Theme.gold : Theme.faint; background: job.checked ? Theme.gold : transparent;
+                                    if job.checked : Glyph { x: 2px; y: 2px; width: 14px; height: 14px; kind: "check"; tint: #1d1d1f; }
+                                }
+                                TouchArea { enabled: !root.panel-open; mouse-cursor: pointer; clicked => { check-focus.focus(); root.toggle-checked(job.id); } }
+                            }
+                            if job.can-resume : ActionButton { x: parent.width - 178px; y: 39px; width: 80px; height: 28px; compact: true; primary: true; text: "Resume"; a11y-label: "Resume " + job.name; enabled: !root.panel-open; clicked => { root.resume-download(job.id); } }
+                            if job.can-pause : ActionButton { x: parent.width - 178px; y: 39px; width: 80px; height: 28px; compact: true; subtle: true; text: "Pause"; a11y-label: "Pause " + job.name; enabled: !root.panel-open; clicked => { root.pause-download(job.id); } }
+                            if !job.completed : ActionButton { x: parent.width - 90px; y: 39px; width: 80px; height: 28px; compact: true; subtle: true; text: "Details"; enabled: !root.panel-open; clicked => { root.select-download(job.id); root.details-open = true; } }
+                            if job.completed : ActionButton { x: parent.width - 176px; y: 34px; width: 66px; height: 28px; compact: true; subtle: true; text: "Details"; enabled: !root.panel-open; clicked => { root.select-download(job.id); root.details-open = true; } }
+                            if job.completed && job.file-available : ActionButton { x: parent.width - 102px; y: 34px; width: 92px; height: 28px; compact: true; text: "Open file"; enabled: !root.panel-open; clicked => { root.open-download(job.id); } }
+                            if job.completed && !job.file-available : Text { x: parent.width - 102px; y: 34px; width: 92px; height: 28px; text: "File missing"; color: Theme.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    if root.downloads.length == 0 : VerticalLayout {
+                        padding-top: 20px; padding-bottom: 14px; spacing: 7px;
+                        Text { text: root.filter-index == 0 ? "Nothing in the queue yet." : "No downloads in this view."; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                        Text { text: root.filter-index == 0 ? "Links, progress, and finished files stay together here." : "Switch to All to see the rest of your downloads."; color: Theme.faint; font-size: 12px; wrap: word-wrap; }
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+            }
+
+        }
+
+
+        }
+
+    // Portrait sheets retain their own state; backend snapshots never recreate them.
+    overlay := Rectangle {
+        visible: root.panel-open || self.opacity > 0;
+        opacity: root.panel-open ? 1 : 0;
+        background: #070907cc;
+        animate opacity { duration: Theme.quick; }
+        // Outside the panel: one click dismisses Settings. Other modal flows retain their own behavior.
+        TouchArea {
+            clicked => { if root.settings-open { root.settings-open = false; } }
+        }
+        Sheet {
+            surface-width: root.width; surface-height: root.height;
+            opened: root.settings-open; height: min(root.height - 48px, 734px);
+            VerticalLayout {
+                padding: 22px; padding-top: 30px; spacing: 12px;
+                HorizontalLayout {
+                    height: 36px;
+                    Text { text: "Preferences"; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 25px; }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { glyph: "close"; label: "Close settings"; clicked => { root.settings-open = false; } }
+                }
+                Text { height: 16px; text: "A little more control over every transfer."; color: Theme.muted; font-size: 13px; }
+                // The form owns a bounded viewport. Its intrinsic size must never
+                // push the permanent Save / attribution footer out of the sheet.
+                settings-scroll := ScrollView {
+                    min-height: 100px; vertical-stretch: 1;
+                    content-width: self.visible-width;
+                     content-height: max(self.visible-height, 548px);
+                     Rectangle {
+                         x: 0px; y: 0px; width: settings-scroll.visible-width; height: 548px;
+                        Text { x: 0px; y: 0px; width: parent.width; height: 13px; text: "TRANSFER ENGINE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.3px; }
+                        HorizontalLayout {
+                            x: 0px; y: 26px; width: parent.width; height: 78px; spacing: 14px;
+                            VerticalLayout {
+                                spacing: 7px;
+                                Text { text: "Connections per file"; color: Theme.muted; font-size: 13px; }
+                                settings-first := TextField { height: 40px; text <=> root.setting-connections; label: "Connections"; }
+                                Text { text: "1–64 workers"; color: Theme.faint; font-size: 12px; }
+                            }
+                            VerticalLayout {
+                                spacing: 7px;
+                                Text { text: "Downloads at once"; color: Theme.muted; font-size: 13px; }
+                                TextField { height: 40px; text <=> root.setting-concurrent; label: "Concurrent downloads"; }
+                                Text { text: "1–8 files"; color: Theme.faint; font-size: 12px; }
+                            }
+                        }
+                        HorizontalLayout {
+                            x: 0px; y: 118px; width: parent.width; height: 78px; spacing: 14px;
+                            VerticalLayout {
+                                spacing: 7px;
+                                Text { text: "Speed limit · KiB/s"; color: Theme.muted; font-size: 13px; }
+                                TextField { height: 40px; text <=> root.setting-speed; label: "Speed limit KiB/s"; }
+                                Text { text: "0 = unlimited"; color: Theme.faint; font-size: 12px; }
+                            }
+                            VerticalLayout {
+                                spacing: 7px;
+                                Text { text: "Retry attempts"; color: Theme.muted; font-size: 13px; }
+                                TextField { height: 40px; text <=> root.setting-retries; label: "Retry attempts"; }
+                                Text { text: "0–8 retries"; color: Theme.faint; font-size: 12px; }
+                            }
+                        }
+                        Text { x: 0px; y: 209px; width: parent.width; height: 28px; text: "QDM adapts to each server. More connections are not always faster."; color: Theme.faint; font-size: 12px; wrap: word-wrap; vertical-alignment: top; }
+                        Rectangle { x: 0px; y: 246px; width: parent.width; height: 1px; background: Theme.edge; }
+                        Text { x: 0px; y: 262px; width: parent.width; height: 13px; text: "FILES & APPEARANCE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.3px; }
+                        Text { x: 0px; y: 290px; width: parent.width; height: 14px; text: "Download folder"; color: Theme.muted; font-size: 13px; }
+                         TextField { x: 0px; y: 310px; width: parent.width; height: 40px; text <=> root.setting-directory; label: "Download folder"; }
+                         GoldCheckBox { x: 0px; y: 368px; height: 22px; text: "Close to tray"; checked <=> root.setting-tray; }
+                         GoldCheckBox { x: 0px; y: 400px; height: 22px; text: "Reduced motion"; checked <=> root.reduced-motion; }
+                         Text { x: 0px; y: 438px; width: parent.width; height: 14px; text: "QUEUE LIMITS · one per line: name=KiB/s"; color: Theme.gold; font-size: 12px; letter-spacing: 0.8px; }
+                         TextEdit { x: 0px; y: 460px; width: parent.width; height: 70px; text <=> root.setting-queue-limits; accessible-label: "Queue speed limits"; font-size: 12px; wrap: word-wrap; }
+                         Text { x: 0px; y: 532px; width: parent.width; height: 14px; text: "Default=256 applies to unassigned downloads · 0 = unlimited · max 256"; color: Theme.faint; font-size: 11px; }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.edge; }
+                Rectangle {
+                    height: 76px;
+                    ActionButton { x: 0px; y: 9px; width: 184px; height: 37px; text: "Browser integration"; glyph: "browser"; subtle: true; clicked => { root.open-integration(); } }
+                    ActionButton { x: 0px; y: 47px; text: "Add multiple downloads"; compact: true; subtle: true; clicked => { root.advanced-open = true; } }
+                    ActionButton {
+                        x: parent.width - 128px; y: 9px; width: 128px; height: 37px;
+                        text: "Save settings"; primary: true; clicked => { root.save-settings(); }
+                    }
+                }
+            }
+        }
+        Sheet {
+            surface-width: root.width; surface-height: root.height;
+             opened: root.advanced-open; height: min(root.height - 62px, 650px);
+            VerticalLayout {
+                padding: 22px; padding-top: 30px; spacing: 13px;
+                HorizontalLayout {
+                    height: 36px;
+                    Text { text: "Add downloads"; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 24px; }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { glyph: "close"; label: "Close add downloads"; clicked => { root.advanced-open = false; } }
+                }
+                Text { text: "One HTTP or HTTPS link per line."; color: Theme.muted; font-size: 12px; }
+                 batch-first := TextEdit { text <=> root.batch-urls; accessible-label: "Download URLs"; min-height: 110px; vertical-stretch: 1; }
+                 TextField { height: 40px; text <=> root.batch-queue; label: "Queue name"; placeholder: "Leave blank for Default"; }
+                 TextField { height: 40px; text <=> root.batch-speed-limit; label: "Per-download limit KiB/s"; placeholder: "0 = unlimited"; }
+                Rectangle { height: 1px; background: Theme.edge; }
+                Text { text: "VERIFY A SINGLE FILE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.2px; }
+                Text { text: "Expected SHA-256 · optional"; color: Theme.muted; font-size: 13px; }
+                TextField { text <=> root.expected-hash; label: "Expected SHA-256"; placeholder: "64 hexadecimal characters"; }
+                GoldCheckBox { text: "Start immediately"; checked <=> root.start-now; }
+                HorizontalLayout {
+                    height: 38px;
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton { text: "Add downloads"; glyph: "download"; primary: true; clicked => { root.add-batch(); } }
+                }
+            }
+        }
+        Sheet {
+            surface-width: root.width; surface-height: root.height;
+            opened: root.refresh-open; height: 310px;
+            VerticalLayout {
+                padding: 22px; padding-top: 30px; spacing: 15px;
+                Text { text: "A fresh link."; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 25px; }
+                Text { text: "Use a new URL for the same file. QDM checks the remote file before resuming your saved progress."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                refresh-first := TextField { text <=> root.replacement-url; label: "Replacement URL"; placeholder: "https://…"; link-icon: true; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    height: 38px;
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton { text: "Cancel"; subtle: true; clicked => { root.refresh-open = false; } }
+                    ActionButton { text: "Replace and resume"; primary: true; clicked => { root.refresh-selected(); } }
+                }
+            }
+        }
+        Sheet {
+            surface-width: root.width; surface-height: root.height;
+            opened: root.integration-open; height: 440px;
+            VerticalLayout {
+                padding: 22px; padding-top: 30px; spacing: 14px;
+                HorizontalLayout {
+                    height: 36px;
+                    Text { text: "Browser connection"; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 23px; }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { glyph: "close"; label: "Close browser integration"; clicked => { root.integration-open = false; } }
+                }
+                Text { text: "Send downloads from Zen or Firefox. Pair the QDM extension with the details below."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                Rectangle { height: 1px; background: Theme.edge; }
+                Text { text: "LOCAL BRIDGE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.3px; }
+                HorizontalLayout {
+                    Text { text: "Port"; color: Theme.muted; font-size: 12px; }
+                    Text { text: root.bridge-port; color: Theme.gold; font-size: 18px; horizontal-alignment: right; }
+                }
+                Text { text: "Pairing token"; color: Theme.muted; font-size: 13px; }
+                integration-first := TextField { text: root.bridge-token; label: "Pairing token"; read-only: true; }
+                Text { text: root.extension-path; color: Theme.faint; font-size: 12px; wrap: word-wrap; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    height: 38px;
+                    ActionButton { text: "Extension folder"; glyph: "folder"; clicked => { root.open-extension(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton { text: "Copy token"; primary: true; clicked => { root.copy-token(); } }
+                }
+            }
+        }
+        Sheet {
+            surface-width: root.width; surface-height: root.height;
+            opened: root.remove-open; height: 380px;
+            VerticalLayout {
+                padding: 22px; padding-top: 30px; spacing: 16px;
+                Text { text: root.bulk-remove ? "Remove selected downloads?" : "Remove this download?"; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 23px; }
+                Text { text: root.bulk-remove ? root.checked-count + " selected" : root.remove-target-name; color: Theme.gold; font-size: 12px; overflow: elide; }
+                RemoveChoice { text: "Remove from list only"; selected: !root.delete-local-files; chosen => { root.delete-local-files = false; } }
+                RemoveChoice { text: "Also delete completed local files (if present)"; selected: root.delete-local-files; chosen => { root.delete-local-files = true; } }
+                Text { text: "Shared files are protected: removing a record keeps the actual file while another download references it. To delete a shared file, remove its final referencing record with this option. Incomplete downloads lose their saved parts when removed."; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    height: 38px;
+                    Rectangle { horizontal-stretch: 1; }
+                    remove-first := ActionButton { text: "Cancel"; subtle: true; clicked => { root.remove-open = false; } }
+                    ActionButton { text: "Remove download"; primary: true; clicked => { if root.bulk-remove { root.remove-checked(); } else { root.remove-selected(); } } }
+                }
+            }
+        }
+        Sheet {
+            surface-width: root.width; surface-height: root.height;
+            opened: root.details-open; height: min(root.height - 62px, 742px);
+            VerticalLayout {
+                padding: 22px; padding-top: 30px; spacing: 12px;
+                HorizontalLayout {
+                    height: 36px;
+                    Text { text: "Inside the transfer"; color: Theme.ink; font-family: "Segoe UI Variable"; font-size: 24px; }
+                    Rectangle { horizontal-stretch: 1; }
+                    details-first := IconButton { glyph: "close"; label: "Close connection details"; clicked => { root.details-open = false; } }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    ActionButton { text: "Reveal file"; compact: true; clicked => { root.reveal-selected(); } }
+                    ActionButton { text: "New URL"; compact: true; enabled: !root.can-open; clicked => { root.refresh-open = true; } }
+                    ActionButton { text: "Remove"; compact: true; clicked => { root.bulk-remove = false; root.remove-target-id = root.selected-id; root.remove-target-name = root.selected-name; root.remove-open = true; } }
+                }
+                 Text { text: root.selected-name; color: Theme.gold; font-size: 13px; wrap: word-wrap; }
+                 Text { text: root.selected-host + "  ·  " + root.selected-status; color: Theme.muted; font-size: 12px; overflow: elide; }
+                 Text { text: "TRANSFER LIMITS"; color: Theme.gold; font-size: 12px; letter-spacing: 1px; }
+                 HorizontalLayout {
+                     height: 40px; spacing: 10px;
+                     TextField { horizontal-stretch: 1; text <=> root.selected-queue; label: "Queue"; placeholder: "Default"; }
+                     TextField { horizontal-stretch: 1; text <=> root.selected-download-speed; label: "Per-download limit KiB/s"; placeholder: "0 = unlimited"; }
+                 }
+                 HorizontalLayout {
+                     height: 32px;
+                     Text { text: "Queue caps are set in Preferences."; color: Theme.faint; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                     ActionButton { text: "Save limits"; compact: true; clicked => { root.update-download-limits(); } }
+                 }
+                 if root.selected-notice != "" : TextEdit {
+                    text: root.selected-notice; read-only: true;
+                    accessible-label: "Transfer notice"; height: 74px; font-size: 13px; wrap: word-wrap;
+                }
+                if root.stage-visible : Rectangle {
+                    height: root.stage-indeterminate ? 22px : 30px;
+                    accessible-role: groupbox;
+                    accessible-label: root.stage-indeterminate ? "Verifying saved download data" : "File assembly";
+                    VerticalLayout {
+                        spacing: 5px;
+                        HorizontalLayout {
+                            Text { text: root.stage-label; color: Theme.gold; font-size: 12px; }
+                            Text { text: root.stage-bytes; color: Theme.muted; font-size: 12px; horizontal-alignment: right; overflow: elide; }
+                        }
+                        if !root.stage-indeterminate : Meter { progress: root.stage-progress; tint: Theme.gold; height: 3px; label: "Detailed file assembly progress"; }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.edge; }
+                HorizontalLayout {
+                    Text { text: "CONNECTION ACTIVITY"; color: Theme.gold; font-size: 12px; letter-spacing: 1px; }
+                    Text { text: root.lane-summary; color: Theme.muted; font-size: 12px; horizontal-alignment: right; }
+                }
+                Rectangle {
+                    height: root.lanes.length > 32 ? 34px : 16px;
+                    for lane[index] in root.lanes : Rectangle {
+                        x: (index - floor(index / 16) * 16) * (parent.width / 16);
+                        y: floor(index / 16) * 8px;
+                        width: parent.width / 16 - 3px; height: 5px; border-radius: 2px;
+                        background: #383e35;
+                        Rectangle { x: 0px; y: 0px; width: parent.width * lane.progress; height: parent.height; border-radius: 2px; background: lane.active ? Theme.green : #b99762; animate width { duration: Theme.smooth; } }
+                    }
+                }
+                lane-scroll := ScrollView {
+                    vertical-stretch: 1; min-height: 120px;
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, ceil(root.lanes.length / 2) * 79px);
+                    for lane[index] in root.lanes : LaneTile {
+                        item: lane;
+                        width: (lane-scroll.visible-width - 8px) / 2; height: 71px;
+                        x: (index - floor(index / 2) * 2) * (self.width + 8px);
+                        y: floor(index / 2) * 79px;
+                    }
+                }
+                Text { text: root.lane-note; color: Theme.faint; font-size: 12px; wrap: word-wrap; }
+                Rectangle { height: 1px; background: Theme.edge; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Glyph { kind: "shield"; width: 15px; height: 15px; tint: Theme.green; }
+                    Text { text: root.integrity-label; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                }
+                if root.sha256 != "" : TextField { text: root.sha256; label: "SHA-256"; read-only: true; }
+            }
+        }
+    }
+    Rectangle {
+        visible: root.toast != "" || self.opacity > 0;
+        opacity: root.toast == "" ? 0 : 1;
+        x: 24px; y: parent.height - 176px + (root.toast == "" ? 10px : 0px);
+        width: parent.width - 48px; height: 64px;
+        border-radius: 10px; border-width: 1px;
+        border-color: root.toast-error ? #a77563 : #8d7b56;
+        background: root.toast-error ? #34251f : #2d2b22;
+        animate y { duration: Theme.smooth; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        animate opacity { duration: Theme.quick; }
+        HorizontalLayout {
+            padding: 13px; spacing: 11px;
+            Text { text: root.toast; color: Theme.ink; font-size: 13px; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; accessible-live-region: polite; }
+            IconButton { glyph: "close"; label: "Dismiss"; clicked => { root.dismiss-toast(); } }
+        }
+    }
+    } // keyboard capture also surrounds the sheets and notifications
+}
+
+
+

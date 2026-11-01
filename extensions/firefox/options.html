@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="th">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QDM — Zen Integration</title><link rel="stylesheet" href="extension.css"></head>
+<body><main>
+<div class="brand">QDM<span>QUEEN DOWNLOAD MANAGER</span></div>
+<h1>Zen Download Integration</h1>
+<p>Zen เชื่อมต่อ QDM อัตโนมัติผ่านตัวช่วยในเครื่อง และเชื่อมต่อใหม่ได้หลังรีสตาร์ตโดยไม่ต้องกรอกรหัส</p>
+<button id="check-connection" type="button">ตรวจสอบและเชื่อมต่ออัตโนมัติ</button>
+<label class="toggle"><input id="autoCapture" type="checkbox" checked> ดักดาวน์โหลดอัตโนมัติเมื่อคลิกไฟล์</label>
+<h2>ตั้งค่าด้วยตนเอง (เฉพาะเมื่อการเชื่อมต่ออัตโนมัติใช้ไม่ได้)</h2>
+<form id="pair-form">
+<label>รหัสจับคู่<input id="token" type="password" autocomplete="off" required minlength="64" maxlength="64"></label>
+<label>พอร์ต<input id="port" type="number" min="17876" max="17885" value="17876" required></label>
+<button type="submit">บันทึกและทดสอบการเชื่อมต่อ</button>
+</form>
+<p id="message" role="status"></p>
+<div class="note">เปิด QDM → ⋯ → เชื่อมเบราว์เซอร์ เพื่อดูรหัสจับคู่และพอร์ต<br>
+QDM ต้องเปิดอยู่ หาก QDM ไม่ตอบรับ Zen จะดาวน์โหลดต่อเองตามปกติ<br>
+ไม่ส่งคุกกี้หรือรหัสผ่านเว็บไซต์ บางเว็บที่ต้องล็อกอินอาจใช้ QDM ไม่ได้</div>
+</main><script src="options.js"></script></body></html>

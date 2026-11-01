@@ -1,0 +1,30 @@
+{
+    "name":  "QDM - QUEEN Download Manager",
+    "version":  "0.3.0",
+    "description":  "Native download manager integration with opt-in capture and safe browser fallback",
+    "permissions":  [
+                        "contextMenus",
+                        "storage",
+                        "downloads",
+                        "nativeMessaging"
+                    ],
+    "icons":  {
+                  "48":  "icon.png",
+                  "128":  "icon.png"
+              },
+    "options_ui":  {
+                       "page":  "options.html",
+                       "open_in_tab":  true
+                   },
+    "manifest_version":  3,
+    "host_permissions":  [
+                             "http://127.0.0.1/*"
+                         ],
+    "background":  {
+                       "service_worker":  "background.js"
+                   },
+    "action":  {
+                   "default_popup":  "popup.html",
+                   "default_title":  "Download with QDM"
+               }
+}

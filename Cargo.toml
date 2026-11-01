@@ -1,0 +1,46 @@
+[package]
+name = "qdm"
+version = "0.4.0"
+edition = "2021"
+description = "QUEEN Download Manager — native Windows download manager"
+build = "build.rs"
+
+[[bin]]
+name = "QDM"
+path = "src/main.rs"
+
+[[bin]]
+name = "QDMHost"
+path = "src/bin/qdm_host.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "net", "signal"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["stream", "native-tls", "http2", "gzip", "brotli", "deflate", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+futures-util = "0.3"
+httpdate = "1"
+url = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility", "system-tray", "raw-window-handle-06", "compat-1-18"] }
+raw-window-handle = "0.6"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Shell_Common", "Win32_UI_Input_KeyboardAndMouse", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Console"] }
+
+[target.'cfg(windows)'.build-dependencies]
+slint-build = "=1.18.1"
+
+[patch.crates-io]
+# Backport Slint PR #13568 (08a297b): repaint Windows-invalidated areas.
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit-1.18.1" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+
