@@ -1,137 +1,76 @@
-# QDM — QUEEN Download Manager 0.3.0
+# QDM — QUEEN Download Manager
 
-QDM เป็นโปรแกรมจัดการดาวน์โหลดสำหรับ Windows x64 ใช้ **Rust + Slint** ในธีม **Dark + Gold** พร้อมแถบความคืบหน้าสีเขียว แสดงงานดาวน์โหลดและการทำงานของแต่ละ Connection ในหน้าหลัก ระบบดาวน์โหลดเดิมยังดูแล HTTP/HTTPS, การแบ่งช่วงไฟล์, Pause/Resume และการตรวจข้อมูลแยกจาก UI
+QDM is a native Windows x64 download manager built with Rust and Slint. Its HTTP(S) engine supports parallel range downloads, pause and resume, and integrity checks. The desktop interface uses a dark and gold theme.
 
-## เริ่มใช้งาน
+## Status
 
-1. วางลิงก์ HTTP หรือ HTTPS ในช่อง **Download URL** แล้วกด **Download** หรือ Enter
-2. เลือกไฟล์จากรายการ **Downloads** ใต้การ์ดไฟล์ที่เลือก แถบ **All / Active / Finished** ใช้กรองรายการ
-3. ดูความเร็ว ขนาดไฟล์ เวลาที่เหลือ และแถบความคืบหน้าในการ์ด **IN FOCUS** เหนือรายการ ส่วน **Connections** ด้านล่างแสดง Worker ทุกช่องของงานที่เลือก
-4. ใช้ **Pause / Resume** เพื่อพักหรือดาวน์โหลดต่อ ใช้ **Pause all / Resume all** เพื่อควบคุมทั้งคิว
-5. เมื่อเสร็จแล้วกด **Open file** เพื่อเปิดไฟล์ หรือไอคอนโฟลเดอร์ข้างปุ่มเพื่อเปิดตำแหน่งไฟล์ ปุ่ม **Download folder** ด้านล่างเปิดโฟลเดอร์ดาวน์โหลดที่ตั้งไว้
-6. หากลิงก์หมดอายุ เลือกงานนั้นแล้วกด **New URL → Replace and resume** ใส่ลิงก์ใหม่ของไฟล์เดิม QDM จะตรวจข้อมูลก่อนนำส่วนที่บันทึกไว้มาใช้ต่อ
-7. **Remove → Remove download** ลบรายการและชิ้นส่วนที่ยังดาวน์โหลดไม่เสร็จ ไฟล์ที่ดาวน์โหลดเสร็จแล้วจะยังอยู่ในโฟลเดอร์เดิม
+The current source is version 0.4.0. The [six-feature implementation plan](docs/QDM-PRISM-SIX-FEATURE-IMPLEMENTATION-PLAN-2026-11-01.md) remains in progress; it is not a claim that all planned features are complete. A release requires the tests in that plan to pass against the same build artifact.
 
-### เพิ่มหลายลิงก์และตรวจแฮชต้นฉบับ
+## Getting started
 
-กด **Batch & verify** ใต้ช่อง URL แล้ววางหนึ่ง URL ต่อบรรทัด ก่อนกด **Add downloads** สามารถปิด **Start immediately** เพื่อเพิ่มรายการไว้โดยยังไม่เริ่มดาวน์โหลด
+1. Paste an HTTP or HTTPS link into **Download URL** and select **Download**.
+2. Use **All**, **Active**, and **Finished** to filter the download list.
+3. Select a download to inspect its progress, speed, and connection activity.
+4. Use **Pause** and **Resume** for individual downloads, or **Pause all** and **Resume all** for all downloads.
+5. Open a completed file or reveal its location. To update an expired link, open **Details**, select **New URL**, and provide a replacement for the same file.
+6. **Remove from list only** keeps a completed file. The separate delete option removes the local file when it is safe to do so.
 
-ช่อง **Expected SHA-256** ใช้ได้เมื่อเพิ่มครั้งละหนึ่ง URL ให้ใส่แฮช 64 ตัวอักษรจากต้นทางที่เชื่อถือได้ หากผลตรวจไม่ตรงกัน QDM จะรายงานข้อผิดพลาดและไม่เผยแพร่ไฟล์ปลายทาง
+Use **Add multiple downloads** in Preferences to enter one URL per line. You can choose a queue, set a per-download speed limit, and disable immediate start. For a single download, an optional expected SHA-256 verifies the whole file against a trusted independent source. A mismatch prevents publication of the final file.
 
-## อ่านสถานะ Connection และการรวมไฟล์
+## Preferences and limits
 
-หน้าหลักแสดง Worker ทั้งหมดในแผง **Connections** แบบกะทัดรัด กด **Inspect** หรือ **Connections** ในแถบเมนูด้านล่างเพื่อเปิด **Inside the transfer** แล้วดูช่องรายละเอียด **#01–#64** แต่ละช่องมีจำนวนไบต์สะสมของ Worker, เปอร์เซ็นต์ของชิ้นส่วนที่กำลังรับ และแถบสีเขียว สามารถเลื่อนดูช่องทั้งหมดได้ ส่วนค่า SHA-256 ของไฟล์ที่เสร็จแล้วอยู่ในหน้ารายละเอียดนี้ด้วย
+Preferences include the per-file connection ceiling (1–64, default 32), concurrent download count (1–8), global speed limit, retry attempts, download folder, close-to-tray behavior, and reduced motion.
 
-| สถานะ | ความหมาย |
+Speed limits use KiB/s; zero means unlimited. The multi-download form and each download's **Details** sheet also support a per-download limit and queue name. In Preferences, enter queue limits one per line, for example:
+
+```text
+Default=512
+media=256
+```
+
+`Default` applies to downloads without a queue name. The engine enforces the applicable global, queue, and per-download limits together. Queue names are case-sensitive. Queue scheduling, priorities, categories, and queue pause/resume remain planned.
+
+## Connections, resume, and integrity
+
+The connection setting is a ceiling, not a speed guarantee. QDM starts with fewer workers and can add connections as data arrives. It adapts to server restrictions such as HTTP 429 responses, and may split eligible remaining ranges between workers. A worker can receive more than one piece; piece identifiers can therefore exceed 64 without exceeding the worker ceiling.
+
+QDM checks server validators and overlapping data before reusing saved progress. Servers without range support use a single stream, which may restart from the beginning after a pause. Sampled overlaps cannot prove that every unsampled byte is unchanged. QDM calculates a SHA-256 for completed files; only a comparison against a trusted expected hash independently verifies the result.
+
+The Details sheet shows individual worker activity and the calculated SHA-256. Its connection history for older downloads may be estimated.
+
+## Browser integration
+
+The Firefox/Zen extension and native host support automatic pairing on Windows. The host stores the pairing token using Windows DPAPI. Install the extension and native host using the provided scripts, or pair manually through **Browser connection** as a fallback.
+
+Automatic capture waits for QDM to accept the download before cancelling the browser download. If QDM rejects the request or is unavailable, the browser keeps the original download. Cancellation failures may still produce duplicates.
+
+The Chromium extension includes opt-in capture source code, but native-host registration for a specific extension ID and real-browser acceptance testing remain outstanding. Firefox/Zen evidence does not establish Chromium compatibility.
+
+The extensions do not automatically forward website cookies or authorization headers. Authenticated and temporary links may therefore fail. Explicit session headers accepted by the local bridge are kept in memory rather than saved in download history. QDM does not bypass authentication or DRM.
+
+## Data and privacy
+
+| Item | Location |
 |---|---|
-| Receiving | Worker กำลังรับข้อมูล |
-| Waiting | Worker เคยรับข้อมูลแล้ว และกำลังรอหรือพักงาน |
-| Done | ชิ้นส่วนล่าสุดที่ Worker รับเสร็จแล้ว |
-| Idle | Worker ยังไม่มีข้อมูลที่รับในงานนี้ |
+| Installed program | `%LOCALAPPDATA%\Programs\QDM\QDM.exe` |
+| Download history and checkpoints | `%APPDATA%\QDM\state-v3.sqlite3` |
+| UI appearance settings | `%APPDATA%\QDM\ui-settings.json` |
+| Partial download | `.qdm-<task-id>.partial` in the download folder |
 
-หนึ่ง Connection อาจรับหลายชิ้นส่วนต่อกัน หมายเลขชิ้นส่วนจึงเพิ่มเกิน 64 ได้โดยไม่ใช่การเปิด Connection เกิน 64 เปอร์เซ็นต์ของช่องอาจเริ่มใหม่เมื่อ Worker ได้รับชิ้นส่วนถัดไป ส่วนจำนวนไบต์สะสมยังเพิ่มต่อเนื่อง งานเก่าที่ไม่มีประวัติ Worker จะแสดงข้อความว่าการจัดกลุ่มข้อมูลย้อนหลังเป็นค่าประมาณ
+Keep a backup of the database and program before replacing an installed build. Do not modify a live SQLite database while QDM is running.
 
-สถานะ **VERIFYING PARTS** แสดงทั้งช่วงตรวจข้อมูลเดิมก่อน Resume และช่วงตรวจความต่อเนื่องระหว่างชิ้นส่วน ก่อนเริ่มรับข้อมูลต่อจะเห็น **Checking saved data…** โดยจำนวนไบต์ที่ดาวน์โหลดไว้ยังคงเดิม ส่วน **COMBINING FILE** มีแถบความคืบหน้าและจำนวนไบต์ของการรวมไฟล์แยกจากการดาวน์โหลด งานจะเป็น **COMPLETED** หลังรวมไฟล์ ตรวจ SHA-256 และเผยแพร่ไฟล์สำเร็จแล้ว
+## Build and test
 
-## ตั้งค่าและลดการเคลื่อนไหว
-
-กด **Settings** ในแถบเมนูด้านล่างเพื่อเปิด **Preferences** แล้วกด **Save settings** หลังแก้ไข
-
-| ตัวเลือก | การใช้งาน |
-|---|---|
-| Connections per file (1–64) | จำนวน Connection สูงสุดต่อไฟล์ ค่าเริ่มต้น 32 |
-| Downloads at once (1–8) | จำนวนไฟล์ที่ดาวน์โหลดพร้อมกัน ค่าเริ่มต้น 2 |
-| Speed limit · KiB/s | จำกัดความเร็วรวมทุกงาน ใส่ 0 เพื่อไม่จำกัด |
-| Retry attempts (0–8) | จำนวนครั้งที่ลองใหม่เมื่อเกิดข้อผิดพลาดชั่วคราว |
-| Download folder | โฟลเดอร์ปลายทาง ต้องเป็นพาธเต็ม |
-| Close to tray | กด X แล้วซ่อนหน้าต่างไว้ในถาดระบบ |
-| Reduced motion | ลดการเคลื่อนไหวของปุ่ม แถบความคืบหน้า และหน้าต่างตั้งค่า |
-
-UI ใช้การเปลี่ยนสีเมื่อชี้เมาส์ การตอบสนองเมื่อกด และการเลื่อนแถบความคืบหน้า โดยใช้ข้อมูลสถานะที่รวมการอัปเดตก่อนแสดงผล ไม่มีพื้นหลังเคลื่อนไหวต่อเนื่องที่จำเป็นต่อการใช้งาน
-
-เมื่อตั้ง **Close to tray** ไว้ สามารถคลิกไอคอน QDM ในถาดระบบเพื่อเปิดหน้าต่างอีกครั้ง หรือใช้เมนู **Open QDM** เมื่อต้องการปิดจริงให้กด **Exit** ด้านล่างหน้าต่าง หรือ **Exit QDM** ในเมนูถาดระบบ โปรแกรมจะพักงานและบันทึกสถานะก่อนปิด
-
-## การต่อโหลดและขอบเขตการตรวจข้อมูล
-
-QDM เริ่มงานแบบ HTTP Range ด้วย Connection จำนวนน้อย แล้วเพิ่มเป็นขั้นเมื่อ Worker ในขั้นนั้นรับข้อมูลได้จริงจนถึงเพดานที่ตั้งไว้ Worker ที่ว่างสามารถช่วยแบ่งช่วงที่เหลือของ Worker อื่นได้
-
-การแบ่งช่วงใหม่ใช้เฉพาะสตรีมที่ตอบกลับถูกต้องและเริ่มรับข้อมูลแล้ว QDM ใช้ความคืบหน้าจริงกับเวลารอคำขอที่สังเกตได้เพื่อหลีกเลี่ยงการแบ่งช่วงท้ายเล็ก ๆ ที่อาจเสียเวลารอคำขอใหม่มากกว่ารอให้สตรีมเดิมรับจบ หากความคืบหน้าหยุดลง ระบบจะประเมินใหม่โดยยังรักษาขอบเขตและจุดบันทึกของแต่ละช่วง
-
-เมื่อพบ HTTP 429 จะลดจำนวน Connection และรอเวลาที่ต้นทางกำหนดก่อนเปิดคำขอใหม่ สตรีมที่ต้นทางตอบรับแล้วจะรับข้อมูลต่อ หากช่วงที่เพิ่งแบ่งถูกปฏิเสธก่อนมีข้อมูล และสตรีมเดิมยังรับช่วงนั้นได้อย่างปลอดภัย QDM จะคืนช่วงให้สตรีมเดิมรับต่อ เมื่อรับข้อมูลได้ต่อเนื่องตามเกณฑ์จะทดลองเพิ่มจำนวน Connection กลับภายในค่าที่ตั้งไว้
-
-**64 เป็นเพดานที่รองรับ** จำนวนที่ใช้จริงขึ้นกับขนาดไฟล์ การรองรับ Range ข้อจำกัดของต้นทาง และการปรับจำนวน Connection ระหว่างทำงาน จำนวน Connection ที่สูงขึ้นไม่รับประกันว่าทุกเว็บไซต์จะเร็วขึ้น
-
-ก่อนใช้ข้อมูลเดิมต่อ QDM ตรวจตัวระบุไฟล์ ETag/Last-Modified และข้อมูลช่วงซ้อนทับสูงสุด 32 KiB หากต้นทางไม่รองรับ Range จะดาวน์โหลดด้วยสตรีมเดียว และหลังพักอาจต้องเริ่มไฟล์ใหม่ หากข้อมูลที่ตรวจไม่ตรงกันจะเริ่มใหม่เพื่อหลีกเลี่ยงการรวมข้อมูลคนละรุ่น
-
-การตรวจช่วงซ้อนทับยืนยันได้เฉพาะช่วงที่ตรวจ ไม่พิสูจน์ว่าทุกไบต์ที่ไม่ได้อ่านซ้ำไม่เคยเปลี่ยน **SHA-256 ที่ QDM คำนวณเองเป็นลายนิ้วมือของไฟล์ที่ได้รับ** การยืนยันตรงกับต้นฉบับต้องเปรียบเทียบกับ Expected SHA-256 ที่ได้จากแหล่งอิสระที่เชื่อถือได้ หน้าจอแยกข้อความเมื่อใส่ค่าแฮชอ้างอิงกับกรณีที่คำนวณแฮชเอง
-
-รุ่นนี้เน้นการดาวน์โหลด HTTP/HTTPS ส่วน FTP, site grabber, การดึงวิดีโอทุกเว็บไซต์, DRM และระบบบัญชีเฉพาะเว็บไม่ได้อยู่ในขอบเขตที่ยืนยันว่ารองรับครบ
-
-## เชื่อมกับ Zen / Firefox
-
-1. ติดตั้งส่วนขยาย Zen/Firefox **QDM AutoCapture 0.3.1** และ Native Host `com.queen.qdm` (บนเครื่องที่ติดตั้งแล้วไม่ต้องทำซ้ำ)
-2. ส่วนขยายจะค้นหา QDM และจับคู่กับรหัสที่เก็บแบบ Windows DPAPI **โดยอัตโนมัติ ไม่ต้องกรอก PIN** แม้หลังเปิด Zen ใหม่หรือเข้าระบบ Windows ใหม่ ตัว Native Host สามารถเริ่ม QDM เมื่อจำเป็น และจะค้นหาพอร์ตใหม่ที่โปรแกรมใช้งานจริง
-3. เปิด **Auto Capture** ในส่วนขยาย หรือใช้เมนูคลิกขวา **ดาวน์โหลดด้วย QDM** กับลิงก์ HTTP/HTTPS สามารถกด **ตรวจสอบและเชื่อมต่ออัตโนมัติ** ในหน้า Settings เพื่อยืนยันสถานะ
-4. หาก Native Messaging ถูกถอนการติดตั้งหรืออัปเกรด QDM แบบล้างโปรแกรม ให้ติดตั้ง Native Host กลับด้วย `scripts/install-zen-autopair.ps1` หรือใช้ **Browser connection → Copy token / Port** จับคู่ด้วยตนเองเป็นทางสำรอง
-
-เมื่อ Auto Capture ทำงาน ส่วนขยายจะให้คำขอดาวน์โหลดเดิมของเบราว์เซอร์ดำเนินต่อจน QDM ตอบรับงาน แล้วจึงยกเลิกรายการเดิมในเบราว์เซอร์ หาก QDM ไม่พร้อมหรือไม่รับงาน คำขอเดิมจะดำเนินต่อใน Zen ตามปกติ หากเบราว์เซอร์ยกเลิกรายการเดิมไม่สำเร็จ ส่วนขยายจะแสดงข้อความว่าอาจมีไฟล์ซ้ำ
-
-**ส่วนขยายที่ให้มาไม่ได้ดึงหรือส่ง Cookie/Authorization ของเว็บให้อัตโนมัติ** จึงไม่รับประกันการดักลิงก์จากเว็บที่ต้องล็อกอิน หรือคำขอ POST ที่ต้องใช้ข้อมูลเฉพาะ เซิร์ฟเวอร์อาจตอบรับการเพิ่มรายการใน QDM แต่การดาวน์โหลดจริงยังต้องผ่านการตรวจและการอนุญาตของต้นทาง
-
-Local Bridge รองรับการรับ request headers ที่ผู้เรียกส่งมาอย่างชัดเจน Header สำหรับเซสชันอยู่ในหน่วยความจำและไม่เขียนลงประวัติแบบข้อความ หลังเปิดโปรแกรมอีกครั้งอาจต้องส่งบริบทการล็อกอินใหม่ รหัสจับคู่บน Windows เก็บด้วย DPAPI เฉพาะผู้ใช้
-
-โฟลเดอร์ `extensions/chromium` ยังมีส่วนขยายสำหรับ Chromium อยู่ด้วย ผลทดสอบ Zen ไม่ได้ยืนยันพฤติกรรมใน Chromium โดยอัตโนมัติ
-
-## สิ่งที่เปลี่ยนใน 0.3.0
-
-- เปลี่ยนหน้าต่างหลักจาก Win32 เป็น Slint โทน Dark + Gold ในเลย์เอาต์แนวตั้ง พร้อมการ์ดงานที่เลือก รายการดาวน์โหลด แผง Worker ทุกช่อง และสถานะรวมไฟล์ในหน้าหลัก
-- เพิ่มการตอบสนองเมื่อชี้เมาส์ กดปุ่ม เลือกงาน และเปิดหน้าต่างย่อย พร้อม Reduced motion
-- รวมสถานะล่าสุดก่อนส่งเข้า UI และอัปเดตข้อมูลขณะทำงานประมาณทุก 200 ms ส่วน Engine ขณะไม่มีงานรอเหตุการณ์
-- รวมการเขียนข้อมูลเล็ก ๆ ไว้ในบัฟเฟอร์ 256 KiB ต่อ Worker แล้ว flush และ sync ก่อนถือว่าเป็นจุดบันทึกที่กู้คืนได้
-- แยกการอ่าน/เขียนไฟล์และคำนวณ SHA-256 ระหว่างรวมไฟล์ออกจากเธรดเครือข่าย ใช้บัฟเฟอร์รวมไฟล์ 1 MiB
-- เพิ่ม Connection เป็นขั้นตามการรับข้อมูลจริง และเก็บสตรีมที่ตอบรับแล้วให้ทำงานต่อเมื่อคำขอช่วงใหม่ถูกจำกัด
-- ป้องกันการแบ่งซ้ำจาก Connection ที่ยังไม่มีข้อมูล และใช้เวลารอคำขอกับอัตรารับข้อมูลจริงช่วยตัดสินใจแบ่งช่วงท้าย
-- คืนช่วงที่ยังไม่มีข้อมูลให้สตรีมเดิมได้เฉพาะเมื่อยังอยู่ในขอบเขตการตอบกลับที่ตรวจแล้ว พร้อมคำนึงถึงการเขียนไฟล์ที่กำลังทำอยู่
-- แสดงช่วงตรวจข้อมูลเดิมก่อน Resume อย่างชัดเจน และล้างข้อความรวมไฟล์/รอลองใหม่เมื่อเสร็จแล้ว
-- ลองแทนไฟล์ประวัติใหม่ช่วงสั้น ๆ เมื่อ Windows ล็อกไฟล์ชั่วคราว เก็บประวัติก่อนหน้าจนกว่าการแทนไฟล์จะสำเร็จ และยังรายงานข้อผิดพลาดที่แก้ไม่ได้
-- ป้องกัน Resume ระหว่างรวมไฟล์ไม่ให้สร้างผู้เขียนไฟล์ซ้ำ และให้ Pause all ครอบคลุมขั้นตอนรวมไฟล์ด้วย
-- แสดงความคืบหน้าของสตรีมเดียว และคืนค่าความคืบหน้าของ Worker หลังตรวจจุดบันทึกที่กู้คืนแล้ว
-- ปรับ Auto Capture ของ Zen ให้รอ QDM ตอบรับก่อนยกเลิกคำขอเดิม
-
-รายการนี้อธิบายการเปลี่ยนแปลงในซอร์ส ความเร็ว RAM/CPU และความลื่นไหลต้องอ่านจากรายงานของโปรแกรมที่ Build และทดสอบจริง ไม่ใช่ผลที่รับประกันจากการเลือก Rust หรือ Slint
-
-## ไฟล์และข้อมูล
-
-| รายการ | ตำแหน่ง |
-|---|---|
-| โปรแกรมที่ติดตั้ง | `%LOCALAPPDATA%\Programs\QDM\QDM.exe` |
-| ประวัติและจุดบันทึก | `%APPDATA%\QDM\state-v2.json` |
-| ชิ้นส่วนที่ดาวน์โหลดยังไม่เสร็จ | `%APPDATA%\QDM\parts-v2` |
-| การตั้งค่าการเคลื่อนไหว | `%APPDATA%\QDM\ui-settings.json` |
-| โฟลเดอร์ดาวน์โหลดเริ่มต้น | Windows Downloads\QDM หรือโฟลเดอร์ที่ตั้งไว้ |
-
-รุ่น 0.3.0 ใช้โครงสร้าง `state-v2` ต่อจากรุ่น Rust 0.2 การอัปเกรดต้องเก็บประวัติและชิ้นส่วนที่ยังไม่เสร็จไว้ ข้อมูล `downloads.json` และไฟล์พักของรุ่น Electron 0.1 ไม่ถูกแปลงเป็นชิ้นส่วนรุ่นใหม่โดยอัตโนมัติ ส่วนตัวถอนการติดตั้งเก็บประวัติและไฟล์ดาวน์โหลดไว้
-
-## Build และทดสอบจากซอร์ส
-
-ต้องใช้ Windows x64, Rust stable สำหรับ MSVC และ Microsoft C++ Build Tools พร้อม Windows SDK โปรเจกต์มี `Cargo.lock` และ Build ด้วย dependency ตาม lockfile ใช้ Slint 1.18.1 และ Windows Schannel สำหรับ TLS
+Building the Windows UI requires Windows x64, Rust stable with the MSVC toolchain, Microsoft C++ Build Tools, and the Windows SDK. `Cargo.lock` pins dependencies. QDM uses Slint 1.18.1 and Windows native TLS; Node.js is used by acceptance tests, not by the installed application.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1
-node tests\acceptance.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\engine-acceptance.json
-node tests\adaptive-recovery.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\adaptive-recovery.json
-node tests\staged-origin-recovery.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\staged-origin-recovery.json
-node tests\tail-scheduling.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\tail-scheduling.json
-node tests\bridge-native.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\bridge.json
-node tests\public-https.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\public-https.json
-powershell -File tests\slint-ui-acceptance.ps1 -Binary target\release\QDM.exe -NodeBinary node.exe -OutputDirectory docs\evidence\slint-idm-20261027\ui
-node tests\slint-render-performance.cjs --binary target\release\QDM.exe --report docs\evidence\slint-idm-20261027\render-performance.json
+cargo test --locked --all-targets
+node tests\acceptance.cjs --binary target\release\QDM.exe
+node tests\bridge-native.cjs --binary target\release\QDM.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\slint-ui-acceptance.ps1 -Binary target\release\QDM.exe -OutputDirectory "$env:TEMP\qdm-ui-evidence"
 ```
 
-ชุด `acceptance.cjs` ของรุ่นนี้มี 34 กรณี รวมการใช้ 32/64 Connection จริง, Dynamic Segmentation, Pause/Resume, การกู้หลังปิดผิดปกติ, ต้นทางไม่รองรับ Range, ช่วงข้อมูลผิดรูปแบบ, การตรวจแฮช และกรณีใหม่เกี่ยวกับบัฟเฟอร์/การรวมไฟล์/การตรวจข้อมูลก่อน Resume การทดสอบ adaptive recovery แยกต่างหากตรวจว่ามี Connection เพิ่มกลับจริงหลัง HTTP 429 และ Pause/Resume ส่วน staged-origin recovery ตรวจการเก็บสตรีมที่ตอบรับแล้ว การเคารพ Retry-After และการรับมือกับ Connection ที่ถูกตัด ชุด tail scheduling อีก 3 กรณีใช้ต้นทางควบคุมเพื่อทดสอบคำขอที่ยังรอ Header, คำตอบที่ยังไม่มีข้อมูล และกรณีที่รอคำขอใหม่แพงกว่ารับช่วงท้ายให้เสร็จ
+Run Rust commands in a Visual Studio Developer Command Prompt when the Windows SDK tools are not already on `PATH`. These commands describe testing steps; they do not certify a release. Verify the complete release-gate evidence and executable SHA-256 before distribution. The engine also exposes a JSON `--cli` mode; the desktop UI in this build requires Windows.
 
-คำสั่งด้านบนเป็นขั้นตอนตรวจรับ ไม่ใช่ประกาศว่าทดสอบผ่านแล้ว ต้องตรวจผลรายงานและ SHA-256 ของ `.exe` ให้ตรงกับไฟล์ที่จะนำไปใช้ การเปรียบเทียบ IDM ต้องใช้ต้นทาง ไฟล์ จำนวน Connection และเงื่อนไขเดียวกัน พร้อมตรวจไฟล์ปลายทางแยกจากตัวเลขความเร็วบนหน้าจอ
-
-Node ใช้สำหรับงานพัฒนาและทดสอบ โปรแกรม QDM ที่ติดตั้งไม่ต้องใช้ Node, Electron หรือ WebView โหมด `--cli` ใช้ Engine เดียวกันและทดสอบบน Linux ได้ ส่วน UI ในชุด Build นี้ใช้ Windows
-
-โค้ด QDM เป็นการพัฒนาขึ้นเอง ข้อสังเกตจากการศึกษา IDM ใช้เพื่อวิเคราะห์พฤติกรรม ไม่มี executable, pseudocode ที่เป็นกรรมสิทธิ์, งานภาพ หรือระบบใบอนุญาตของ IDM รวมอยู่ใน QDM ข้อความลิขสิทธิ์และเงื่อนไขของ dependency อยู่ในชุด third-party notices ที่แจกพร้อมโปรแกรม
+FTP, site grabbing, universal video extraction, DRM support, and site-specific account systems are not verified features. See [third-party notices](docs/third-party/README.md) for dependency licenses.
