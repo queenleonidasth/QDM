@@ -125,3 +125,11 @@ GitHub release: https://github.com/queenleonidasth/QDM/releases/tag/v0.4.0. Rele
   - `public-https` gate — blocked by a test-environment TLS precondition, not a code defect.
   - Chromium registry live registration + real-profile fail-open/duplicate checks; the registration script is dry-run validated only.
 - Status: Phases 3, 4 and 5 are implemented and tested. Phase 2 is hot-path optimized but not fully windowed/benchmarked. Phase 1 is source-complete with an operational registration script pending live browser acceptance. Phase 6 remains not started. All-six completion is **NOT** claimed.
+
+## Interactive verification — 2026-11-02
+- Slint GUI acceptance (`tests/slint-ui-acceptance.ps1`) ran against the freshly built release binary on a real desktop: **14/14 steps passed**, including the Phase 5 Details transfer-limits step and the new clipboard + queue Preferences controls (added controls did not break the UI automation).
+- Chromium browser check on the machine's real Google Chrome install:
+  - The MV3 extension was loaded from `extensions/chromium` and observed live as a service worker with ID `admccjkmockfdflocgggjfgdacdodkdf`.
+  - `install-chromium-nativehost.ps1` registered `com.queen.qdm` under `HKCU\Software\Google\Chrome\NativeMessagingHosts` with a single exact `allowed_origins` entry for that ID; the script self-verified the read-back and backed up prior state.
+  - The registered `QDMHost.exe` completed a native-messaging handshake (`discover`) returning the running bridge on port 17876, confirming the host accepts the Chromium extension-ID caller and reaches the live QDM engine.
+- Honest gaps: Chrome launching the host when the extension itself calls `sendNativeMessage` was not directly observed, because an idle MV3 service worker drops out of the DevTools target list and Chrome blocks opening extension pages as top-level tabs (a browser constraint, not a QDM defect). The interactive run replaced the installed `QDMHost.exe` with the freshly built binary; the previous copy is preserved under `backups/chromium-nativehost-*`. A PowerShell 5.1 operator-precedence bug (`Join-Path` argument parsing) in the registration script was fixed.

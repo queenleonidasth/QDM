@@ -122,7 +122,7 @@ $record = [ordered]@{
     backupDirectory = $backupDir
     note          = 'Load the unpacked/packed extension in the browser, then in QDM use Browser connection to confirm the pairing token, or rely on native discovery from the extension.'
 }
-$evidenceDir = Join-Path $root 'docs\evidence\chromium-nativehost-' + $backupStamp
+$evidenceDir = Join-Path $root ('docs\evidence\chromium-nativehost-' + $backupStamp)
 New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
 ($record | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $evidenceDir 'registration.json') -Encoding UTF8
 $record | ConvertTo-Json -Depth 8
