@@ -4,7 +4,7 @@ pub(crate) mod protocol;
 mod transfer;
 mod store;
 
-use crate::api::{normalize_queue_name, AddRequest, LaneView, SegmentView, Settings, Snapshot, TaskView, MAX_QUEUE_COUNT, MAX_SPEED_LIMIT_KIB};
+use crate::api::{normalize_queue_name, AddRequest, LaneView, QueueConfig, SegmentView, Settings, Snapshot, TaskView, MAX_QUEUE_COUNT, MAX_SPEED_LIMIT_KIB};
 use protocol::{filename_from_url, request_headers, safe_filename, validate_url, Validator};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -389,6 +389,23 @@ fn client(raw: bool) -> Result<Client, String> {
     builder.build().map_err(|e| e.to_string())
 }
 
+/// A queued transfer eligible to launch, carrying its scheduling weight.
+pub(crate) struct LaunchCandidate {
+    pub id: String,
+    pub priority: i32,
+    pub created_at: u64,
+}
+
+/// Choose which eligible transfers fill the `count` free concurrency slots: higher
+/// priority queues launch first, and within one priority the oldest task goes first.
+/// Kept pure and separate from the engine lock so launch ordering is unit-testable
+/// without any live network transfer.
+fn select_launches(candidates: Vec<LaunchCandidate>, count: usize) -> Vec<String> {
+    let mut candidates = candidates;
+    candidates.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.created_at.cmp(&b.created_at)));
+    candidates.into_iter().take(count).map(|candidate| candidate.id).collect()
+}
+
 fn validated_settings(mut settings: Settings, fallback: &Path) -> Result<Settings, String> {
     settings.connections = settings.connections.clamp(1, 64);
     settings.max_concurrent = settings.max_concurrent.clamp(1, 8);
@@ -406,6 +423,24 @@ fn validated_settings(mut settings: Settings, fallback: &Path) -> Result<Setting
         }
     }
     settings.queue_speed_limits = queue_speed_limits;
+    if settings.queues.len() > MAX_QUEUE_COUNT {
+        return Err(format!("Configure no more than {MAX_QUEUE_COUNT} queues"));
+    }
+    let mut queues = BTreeMap::new();
+    for (raw_name, mut config) in std::mem::take(&mut settings.queues) {
+        let name = normalize_queue_name(&raw_name)?;
+        if name.is_empty() { return Err("Queue entries need a queue name".into()); }
+        config.priority = config.priority.clamp(-1000, 1000);
+        let category = config.category_dir.trim();
+        if !category.is_empty() && !Path::new(category).is_absolute() {
+            return Err(format!("Category folder for queue '{name}' must be an absolute path"));
+        }
+        config.category_dir = category.to_owned();
+        if queues.insert(name, config).is_some() {
+            return Err("Queue names must be unique after trimming".into());
+        }
+    }
+    settings.queues = queues;
     if settings.download_dir.is_empty() {
         settings.download_dir = fallback.to_string_lossy().into_owned();
     }
@@ -611,9 +646,15 @@ impl Engine {
             return Err("Expected SHA-256 must contain 64 hexadecimal characters".into());
         }
         let settings = lock(&self.inner.state).settings.clone();
+        let category_dir = settings
+            .queues
+            .get(&queue)
+            .map(|q| q.category_dir.clone())
+            .filter(|dir| !dir.trim().is_empty());
         let directory = request
             .directory
             .filter(|s| !s.trim().is_empty())
+            .or(category_dir)
             .unwrap_or(settings.download_dir.clone());
         if !Path::new(&directory).is_absolute() {
             return Err("Choose an absolute download folder".into());
@@ -956,6 +997,50 @@ impl Engine {
         Ok(())
     }
 
+    pub async fn set_queue_paused(&self, name: &str, paused: bool) -> Result<(), String> {
+        let name = normalize_queue_name(name)?;
+        if name.is_empty() {
+            return Err("The Default queue cannot be paused individually; use Pause all.".into());
+        }
+        let active_ids = {
+            let mut state = lock(&self.inner.state);
+            if paused {
+                state.settings.queues.entry(name.clone()).or_default().paused = true;
+            } else if let Some(config) = state.settings.queues.get_mut(&name) {
+                config.paused = false;
+            }
+            if !paused {
+                Vec::new()
+            } else {
+                // Move queued/scheduled tasks in the queue to paused, then (after the
+                // mutable pass finishes) collect the ids that are still actively running.
+                for task in &mut state.tasks {
+                    if task.view.queue == name && matches!(task.view.status.as_str(), "queued" | "scheduled") {
+                        task.view.status = "paused".into();
+                        task.view.scheduled_at = None;
+                        task.view.speed_bps = 0;
+                    }
+                }
+                state
+                    .tasks
+                    .iter()
+                    .filter(|t| t.view.queue == name && state.active.contains_key(&t.view.id))
+                    .map(|t| t.view.id.clone())
+                    .collect()
+            }
+        };
+        // Suspend in-flight transfers of the paused queue through the normal pause path.
+        for id in active_ids {
+            self.pause(&id).await?;
+        }
+        self.inner.work_changed.notify_waiters();
+        self.changed();
+        self.persist().await?;
+        self.emit();
+        self.kick();
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> Result<(), String> {
         let handles = {
             let mut state = lock(&self.inner.state);
@@ -1101,14 +1186,20 @@ impl Engine {
                 }
             }
             let count = (state.settings.max_concurrent as usize).saturating_sub(state.active.len());
-            let ids = state
+            // Queued transfers in a paused queue are skipped; each queue's priority
+            // decides launch order when concurrency slots open up.
+            let candidates = state
                 .tasks
                 .iter()
-                .rev()
                 .filter(|t| t.view.status == "queued" && !state.active.contains_key(&t.view.id))
-                .take(count)
-                .map(|t| t.view.id.clone())
+                .filter(|t| !state.settings.queues.get(&t.view.queue).map(|q| q.paused).unwrap_or(false))
+                .map(|t| LaunchCandidate {
+                    id: t.view.id.clone(),
+                    priority: state.settings.queues.get(&t.view.queue).map(|q| q.priority).unwrap_or(0),
+                    created_at: t.view.created_at,
+                })
                 .collect::<Vec<_>>();
+            let ids = select_launches(candidates, count);
             let mut launches = Vec::new();
             for id in ids {
                 let (stop, stop_rx) = watch::channel(false);
@@ -1142,6 +1233,83 @@ impl Engine {
     }
 }
 
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn validated_settings_clamps_priority_and_accepts_absolute_category() {
+        let mut settings = Settings::default();
+        settings.download_dir = "C:\\downloads".into();
+        settings.queues.insert("media".into(), QueueConfig { priority: 99999, category_dir: "C:\\media".into(), paused: false });
+        let validated = validated_settings(settings, Path::new("C:\\fallback")).unwrap();
+        let media = validated.queues.get("media").unwrap();
+        assert_eq!(media.priority, 1000);
+        assert_eq!(media.category_dir, "C:\\media");
+    }
+
+    #[test]
+    fn validated_settings_rejects_relative_category_and_blank_name() {
+        let mut settings = Settings::default();
+        settings.download_dir = "C:\\tmp".into();
+        settings.queues.insert("media".into(), QueueConfig { priority: 0, category_dir: "relative/dir".into(), paused: false });
+        assert!(validated_settings(settings.clone(), Path::new("C:\\fallback")).is_err());
+        let mut settings = settings;
+        settings.queues.remove("media");
+        settings.queues.insert("   ".into(), QueueConfig::default());
+        assert!(validated_settings(settings, Path::new("C:\\fallback")).is_err());
+    }
+
+    #[test]
+    fn select_launches_prefers_priority_then_oldest() {
+        let cand = |id: &str, priority: i32, created_at: u64| LaunchCandidate { id: id.into(), priority, created_at };
+        let picks = select_launches(vec![
+            cand("low1", 0, 100), cand("hi1", 5, 300), cand("hi2", 5, 100), cand("low2", 0, 50),
+        ], 3);
+        assert_eq!(picks, vec!["hi2".to_string(), "hi1".to_string(), "low2".to_string()]);
+        assert!(select_launches(vec![cand("x", 0, 1)], 0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn queue_category_directs_new_downloads_to_its_folder() {
+        let root = std::env::temp_dir().join(format!("qdm-cat-{}", Uuid::new_v4()));
+        let downloads = root.join("downloads");
+        fs::create_dir_all(&downloads).await.unwrap();
+        let engine = Engine::open(root.join("state"), downloads.clone()).await.unwrap();
+        let media_dir = downloads.join("media").to_string_lossy().into_owned();
+        let mut settings = engine.snapshot().settings;
+        settings.queues.insert("media".into(), QueueConfig { priority: 0, category_dir: media_dir.clone(), paused: false });
+        engine.update_settings(settings).await.unwrap();
+        let id = engine.add(AddRequest { url: "https://example.com/a.bin".into(), queue: "media".into(), start: false, ..AddRequest::default() }).await.unwrap();
+        let view = engine.snapshot().downloads.into_iter().find(|task| task.id == id).unwrap();
+        assert_eq!(view.directory, media_dir);
+        assert_eq!(view.status, "paused");
+        assert!(Path::new(&media_dir).is_dir());
+        drop(engine);
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queue_config_round_trips_through_sqlite() {
+        let root = std::env::temp_dir().join(format!("qdm-queue-store-{}", Uuid::new_v4()));
+        let downloads = root.join("downloads");
+        fs::create_dir_all(&downloads).await.unwrap();
+        let config = QueueConfig { priority: 7, category_dir: downloads.join("hi").to_string_lossy().into_owned(), paused: true };
+        {
+            let engine = Engine::open(root.join("state"), downloads.clone()).await.unwrap();
+            let mut settings = engine.snapshot().settings;
+            settings.queues.insert("hi".into(), config.clone());
+            engine.update_settings(settings).await.unwrap();
+            drop(engine);
+        }
+        let reopened = Engine::open(root.join("state"), downloads.clone()).await.unwrap();
+        let restored = reopened.snapshot().settings.queues.get("hi").cloned().unwrap();
+        assert_eq!(restored, config);
+        drop(reopened);
+        fs::remove_dir_all(&root).await.unwrap();
+    }
+}
 
 #[cfg(test)]
 mod removal_tests {
