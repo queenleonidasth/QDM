@@ -12,6 +12,19 @@ pub fn normalize_queue_name(value: &str) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
+/// Per-queue scheduling metadata. Priority orders which queues start first when
+/// concurrency slots free up (higher wins); category_dir routes a queue's downloads
+/// to a dedicated folder; paused stops that queue from launching new transfers and
+/// suspends its in-flight ones. Serializes inside `Settings`, so queue entities
+/// persist with the existing settings blob and need no separate schema migration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct QueueConfig {
+    pub priority: i32,
+    pub category_dir: String,
+    pub paused: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -21,10 +34,14 @@ pub struct Settings {
     pub retries: u8,
     pub download_dir: String,
     pub close_to_tray: bool,
+    /// Opt-in clipboard link detection. Disabled by default so QDM never inspects
+    /// the clipboard unless the user turns it on in Preferences.
+    pub clipboard_suggestions: bool,
     pub queue_speed_limits: BTreeMap<String, u64>,
+    pub queues: BTreeMap<String, QueueConfig>,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { connections: 32, max_concurrent: 2, speed_limit_kib: 0, retries: 3, download_dir: String::new(), close_to_tray: true, queue_speed_limits: BTreeMap::new() } }
+    fn default() -> Self { Self { connections: 32, max_concurrent: 2, speed_limit_kib: 0, retries: 3, download_dir: String::new(), close_to_tray: true, clipboard_suggestions: false, queue_speed_limits: BTreeMap::new(), queues: BTreeMap::new() } }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -150,6 +167,7 @@ pub enum Command {
     RemoveWithFile(String),
     ReplaceUrl { id: String, url: String },
     UpdateSettings(Settings),
+    SetQueuePaused { name: String, paused: bool },
     PauseAll,
     ResumeAll,
     OpenFile(String),

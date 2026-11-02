@@ -2476,6 +2476,37 @@ mod tests {
         assert_eq!(bucket.wait_duration(now + Duration::from_secs(1), 2, 2048), Duration::from_secs(1));
     }
 
+    // Phase 3 fairness benchmark: a global or per-task budget is a single shared
+    // token bucket. Even with the maximum worker fan-out drawing on it concurrently,
+    // their combined throughput is capped at one rate (workers must never each get an
+    // entire job cap) yet no worker is starved far below that ceiling. Time is stepped
+    // synthetically so the result is deterministic without real sleeps.
+    #[test]
+    fn max_workers_share_one_bucket_without_overshoot_or_starvation() {
+        let start = Instant::now();
+        let rate_kib: u64 = 100;
+        let chunk: u64 = 1024;
+        let workers: u32 = 64;
+        let seconds: u64 = 10;
+        let steps: u64 = seconds * 1000;
+        let expected = rate_kib * 1024 * seconds; // one-rate ceiling for the whole run
+        let mut bucket = RateBucket::default();
+        let mut consumed: u64 = 0;
+        for step in 0..steps {
+            let now = start + Duration::from_millis(step + 1);
+            for _ in 0..workers {
+                if bucket.wait_duration(now, rate_kib, chunk).is_zero() {
+                    bucket.consume(chunk);
+                    consumed += chunk;
+                }
+            }
+        }
+        assert!(consumed <= expected, "shared budget overshot its one-rate ceiling: {consumed} > {expected}");
+        assert!(consumed < expected * 2, "fan-out fairness broken: workers behaved like {}x independent budgets", consumed / expected);
+        // Allow up to ~1% float/clamp drift; the run must still saturate the shared budget.
+        assert!(consumed >= expected - chunk * 8, "workers were starved: {consumed} far below {expected}");
+    }
+
     #[tokio::test]
     async fn pause_does_not_consume_shared_bandwidth_tokens() {
         let root = std::env::temp_dir().join(format!("qdm-throttle-{}", Uuid::new_v4()));

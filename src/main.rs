@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod api;
 mod bridge;
+mod clipboard;
 mod engine;
 mod platform;
 #[cfg(windows)]
@@ -267,6 +268,12 @@ async fn cli_request(
             engine.update_settings(settings).await?;
             Ok(json!(engine.snapshot().settings))
         }
+        "queue_pause" => {
+            let queue = r.get("queue").and_then(Value::as_str).ok_or("queue is required")?;
+            let paused = r.get("paused").and_then(Value::as_bool).unwrap_or(true);
+            engine.set_queue_paused(queue, paused).await?;
+            Ok(Value::Null)
+        }
         "download_limits" => {
             let queue = r.get("queue").and_then(Value::as_str).ok_or("queue is required")?;
             let speed_limit_kib = r.get("speed_limit_kib").and_then(Value::as_u64).ok_or("speed_limit_kib must be a non-negative integer")?;
@@ -338,6 +345,7 @@ async fn dispatch(
             engine.resume(&id).await?;
         }
         Command::UpdateSettings(s) => engine.update_settings(s).await?,
+        Command::SetQueuePaused { name, paused } => engine.set_queue_paused(&name, paused).await?,
         Command::PauseAll => engine.pause_all().await?,
         Command::ResumeAll => engine.resume_all().await?,
         Command::OpenFile(id) => {

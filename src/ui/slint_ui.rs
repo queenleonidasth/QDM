@@ -3,13 +3,15 @@
 //! selection and interaction animations while telemetry changes.
 #![cfg(windows)]
 
-use crate::api::{normalize_queue_name, AddRequest, Command, Settings, Snapshot, TaskView, UiEvent, MAX_QUEUE_COUNT, MAX_SPEED_LIMIT_KIB};
+use crate::api::{normalize_queue_name, AddRequest, Command, QueueConfig, Settings, Snapshot, TaskView, UiEvent, MAX_QUEUE_COUNT, MAX_SPEED_LIMIT_KIB};
+use crate::clipboard::{display_name, ClipboardWatcher};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{mpsc::{Receiver, Sender}, Arc, Mutex},
@@ -45,6 +47,15 @@ struct ViewState {
     known_ids: Option<HashSet<String>>,
     toast_until: Option<Instant>,
     preferences: PathBuf,
+    // Phase 4 clipboard link detection: pure decision state plus the last observed
+    // OS clipboard change counter used to debounce text reads.
+    clipboard: ClipboardWatcher,
+    clipboard_seq: u64,
+    // Phase 2 incremental render: the display order only changes with membership or
+    // filter, so we hash it and refresh only rows whose render signature moved.
+    order_key: u64,
+    row_sig: Vec<u64>,
+    row_avail: Vec<bool>,
 }
 
 fn human(value: u64) -> String {
@@ -144,6 +155,41 @@ fn rate_sparkline(samples: Option<&VecDeque<u64>>) -> String {
     }).collect::<Vec<_>>().join(" ")
 }
 
+// A row's rendered presentation depends only on these fields. Building the
+// DownloadItem is relatively expensive (several String allocations), so we hash the
+// inputs and rebuild only rows whose signature actually moved on a telemetry tick.
+fn render_signature(task: &TaskView, checked: bool, file_available: bool) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    task.filename.hash(&mut hasher);
+    task.url.hash(&mut hasher);
+    task.status.hash(&mut hasher);
+    task.downloaded_bytes.hash(&mut hasher);
+    task.total_bytes.hash(&mut hasher);
+    task.speed_bps.hash(&mut hasher);
+    task.assembly_bytes.hash(&mut hasher);
+    task.assembly_total_bytes.hash(&mut hasher);
+    checked.hash(&mut hasher);
+    file_available.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn build_item(task: &TaskView, checked: bool, file_available: bool) -> DownloadItem {
+    let progress = task.total_bytes.map(|n| fraction(task.downloaded_bytes, n)).unwrap_or(0.);
+    let stage_visible = matches!(task.status.as_str(), "assembling" | "merging" | "verifying");
+    let stage_indeterminate = task.assembly_total_bytes == 0;
+    let stage_progress = fraction(task.assembly_bytes, task.assembly_total_bytes);
+    DownloadItem {
+        id: task.id.clone().into(), name: task.filename.clone().into(),
+        subtitle: format!("{} · {}{}", host(&task.url), human(task.downloaded_bytes), if task.speed_bps > 0 { format!(" · {}/s", human(task.speed_bps)) } else { String::new() }).into(),
+        status: status_label(&task.status).into(), progress,
+        progress_text: task.total_bytes.map(|_| format!("{:.1}%", progress * 100.)).unwrap_or_else(|| "Size unknown".into()).into(),
+        active: running(&task.status), can_pause: running(&task.status), can_resume: resumable_status(&task.status), completed: task.status == "completed", checked, file_available, failed: matches!(task.status.as_str(), "error" | "failed"),
+        stage_visible, stage_indeterminate, stage_progress,
+        stage_text: if stage_indeterminate { "VERIFYING".into() }
+            else { format!("CHECK {:.0}%", stage_progress * 100.0).into() },
+    }
+}
+
 fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, lanes: &VecModel<LaneItem>) {
     let snapshot = &state.snapshot;
     if !snapshot.downloads.iter().any(|task| task.id == state.selected) {
@@ -177,25 +223,43 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
     ui.set_total_label(snapshot.downloads.len().to_string().into());
     ui.set_connection_label(snapshot.settings.connections.to_string().into());
     ui.set_download_directory(snapshot.settings.download_dir.clone().into());
-    let rows = newest_first(&snapshot.downloads).into_iter().filter(|task| match state.filter {
+    let ordered: Vec<&TaskView> = newest_first(&snapshot.downloads).into_iter().filter(|task| match state.filter {
         1 => visible_in_filter(&task.status, 1), 2 => visible_in_filter(&task.status, 2), _ => true,
-    }).map(|task| {
-        let progress = task.total_bytes.map(|n| fraction(task.downloaded_bytes, n)).unwrap_or(0.);
-        let stage_visible = matches!(task.status.as_str(), "assembling" | "merging" | "verifying");
-        let stage_indeterminate = task.assembly_total_bytes == 0;
-        let stage_progress = fraction(task.assembly_bytes, task.assembly_total_bytes);
-        DownloadItem {
-            id: task.id.clone().into(), name: task.filename.clone().into(),
-            subtitle: format!("{} · {}{}", host(&task.url), human(task.downloaded_bytes), if task.speed_bps > 0 { format!(" · {}/s", human(task.speed_bps)) } else { String::new() }).into(),
-            status: status_label(&task.status).into(), progress,
-            progress_text: task.total_bytes.map(|_| format!("{:.1}%", progress * 100.)).unwrap_or_else(|| "Size unknown".into()).into(),
-            active: running(&task.status), can_pause: running(&task.status), can_resume: resumable_status(&task.status), completed: task.status == "completed", checked: state.checked.contains(&task.id), file_available: task.file_path.as_ref().is_some_and(|p| Path::new(p).is_file()), failed: matches!(task.status.as_str(), "error" | "failed"),
-            stage_visible, stage_indeterminate, stage_progress,
-            stage_text: if stage_indeterminate { "VERIFYING".into() }
-                else { format!("CHECK {:.0}%", stage_progress * 100.0).into() },
-        }
     }).collect();
-    sync_model(jobs, rows);
+    let order_key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (state.filter, ordered.len()).hash(&mut hasher);
+        for task in &ordered { task.id.hash(&mut hasher); }
+        hasher.finish()
+    };
+    if order_key != state.order_key || jobs.row_count() != ordered.len() {
+        // Membership, filter or window changed: order can shift, so rebuild the whole
+        // visible model once and refresh the per-row signature/file-availability cache.
+        let mut sigs = Vec::with_capacity(ordered.len());
+        let mut avail = Vec::with_capacity(ordered.len());
+        let items: Vec<DownloadItem> = ordered.iter().map(|task| {
+            let available = task.file_path.as_ref().is_some_and(|p| Path::new(p).is_file());
+            avail.push(available);
+            sigs.push(render_signature(task, state.checked.contains(&task.id), available));
+            build_item(task, state.checked.contains(&task.id), available)
+        }).collect();
+        sync_model(jobs, items);
+        state.row_sig = sigs;
+        state.row_avail = avail;
+        state.order_key = order_key;
+    } else {
+        // Telemetry-only tick: order and membership are identical, so refresh just the
+        // rows whose rendered output moved. The filesystem is not re-polled here.
+        for (index, task) in ordered.iter().enumerate() {
+            let available = state.row_avail.get(index).copied().unwrap_or(false);
+            let checked = state.checked.contains(&task.id);
+            let sig = render_signature(task, checked, available);
+            if state.row_sig.get(index) != Some(&sig) {
+                jobs.set_row_data(index, build_item(task, checked, available));
+                state.row_sig[index] = sig;
+            }
+        }
+    }
     let task = snapshot.downloads.iter().find(|task| task.id == state.selected);
     ui.set_has_selection(task.is_some());
     if let Some(task) = task {
@@ -207,6 +271,8 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
         ui.set_selected_speed(format!("{}/s", human(task.speed_bps)).into());
         ui.set_selected_eta(eta(task).into());
         ui.set_selected_connections(format!("{} / {}", task.connections_active, task.connections_limit).into());
+        ui.set_selected_queue_name(if task.queue.is_empty() { "Default".into() } else { task.queue.clone().into() });
+        ui.set_selected_queue_paused(snapshot.settings.queues.get(&task.queue).map(|queue| queue.paused).unwrap_or(false));
         ui.set_selected_percent(task.total_bytes.map(|_| format!("{:.1}%", progress * 100.)).unwrap_or_else(|| "—".into()).into());
         ui.set_selected_progress(progress);
         ui.set_selected_notice(selected_notice(task).into());
@@ -256,6 +322,7 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
         ui.set_selected_bytes("0 B / —".into()); ui.set_selected_speed("—".into());
         ui.set_selected_eta("Time remaining —".into()); ui.set_selected_percent("0%".into());
         ui.set_selected_progress(0.); ui.set_selected_connections(format!("0 / {}", snapshot.settings.connections).into());
+        ui.set_selected_queue_name("".into()); ui.set_selected_queue_paused(false);
         ui.set_can_pause(false); ui.set_can_resume(false); ui.set_can_open(false);
         ui.set_stage_visible(false); ui.set_stage_indeterminate(false);
         ui.set_stage_progress(0.); ui.set_stage_label("".into()); ui.set_stage_bytes("".into());
@@ -307,6 +374,29 @@ fn parse_queue_speed_limits(value: &str) -> Result<BTreeMap<String, u64>, String
     }
     Ok(limits)
 }
+fn parse_queue_configs(value: &str) -> Result<BTreeMap<String, QueueConfig>, String> {
+    let mut queues = BTreeMap::new();
+    for (index, line) in value.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let mut segments = line.split('|');
+        let raw_name = segments.next().unwrap_or("");
+        let name = normalize_queue_name(raw_name).map_err(|error| format!("Queue line {}: {error}", index + 1))?;
+        if name.is_empty() { return Err(format!("Queue line {} needs a name.", index + 1)); }
+        let priority = match segments.next() {
+            Some(value) => value.trim().parse::<i32>().map_err(|_| format!("Queue line {} priority must be a whole number.", index + 1))?,
+            None => 0,
+        };
+        let category_dir = segments.next().unwrap_or("").trim().to_owned();
+        if queues.insert(name, QueueConfig { priority, category_dir, paused: false }).is_some() {
+            return Err(format!("Queue names must be unique after trimming (line {}).", index + 1));
+        }
+        if queues.len() > MAX_QUEUE_COUNT {
+            return Err(format!("Configure no more than {MAX_QUEUE_COUNT} queues."));
+        }
+    }
+    Ok(queues)
+}
 fn settings_from(ui: &QdmWindow, base: &Settings) -> Result<Settings, String> {
     let mut settings = base.clone();
     settings.connections = ui.get_setting_connections().trim().parse::<u8>().ok().filter(|n| (1..=64).contains(n)).ok_or("Connections must be a whole number from 1 to 64.")?;
@@ -315,8 +405,21 @@ fn settings_from(ui: &QdmWindow, base: &Settings) -> Result<Settings, String> {
     settings.retries = ui.get_setting_retries().trim().parse::<u8>().ok().filter(|n| *n <= 8).ok_or("Retry attempts must be from 0 to 8.")?;
     settings.download_dir = ui.get_setting_directory().trim().into();
     settings.queue_speed_limits = parse_queue_speed_limits(&ui.get_setting_queue_limits().to_string())?;
+    let mut parsed_queues = parse_queue_configs(&ui.get_setting_queue_config().to_string())?;
+    for (name, config) in parsed_queues.iter_mut() {
+        config.paused = base.queues.get(name).map(|existing| existing.paused).unwrap_or(false);
+    }
+    // Keep a queue paused across a Preferences save even if its line was edited away,
+    // so pausing is a deliberate, separate action rather than something text edits erase.
+    for (name, existing) in base.queues.iter() {
+        if existing.paused && !parsed_queues.contains_key(name) {
+            parsed_queues.insert(name.clone(), existing.clone());
+        }
+    }
+    settings.queues = parsed_queues;
     if !Path::new(&settings.download_dir).is_absolute() { return Err("The download folder must be an absolute Windows path.".into()); }
     settings.close_to_tray = ui.get_setting_tray();
+    settings.clipboard_suggestions = ui.get_setting_clipboard();
     Ok(settings)
 }
 
@@ -381,6 +484,30 @@ fn copy_text(text: &str) -> Result<(), String> {
     }
 }
 
+// Clipboard text format identifier (CF_UNICODETEXT) for clipboard reads below.
+const CF_UNICODETEXT: u32 = 13;
+/// Read the current clipboard as Unicode text, if it is available as plain text.
+/// Returns None when the clipboard holds no text format or is momentarily locked.
+fn clipboard_text() -> Option<String> {
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 { return None; }
+        if OpenClipboard(std::ptr::null_mut()) == 0 { return None; }
+        let result = (|| {
+            let handle = GetClipboardData(CF_UNICODETEXT);
+            if handle.is_null() { return None; }
+            let pointer = GlobalLock(handle) as *const u16;
+            if pointer.is_null() { return None; }
+            let mut length = 0usize;
+            while *pointer.add(length) != 0 { length += 1; }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length));
+            GlobalUnlock(handle);
+            Some(text)
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
 pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path) -> Result<(), String> {
     // The measured portrait UI sustains the display cadence with much smaller
     // private memory in the software renderer. Keep an explicit backend override
@@ -404,7 +531,8 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
     ui.set_downloads(ModelRc::from(jobs.clone())); ui.set_lanes(ModelRc::from(lanes.clone()));
     let state = Rc::new(RefCell::new(ViewState {
         snapshot: Snapshot::default(), speed_history: HashMap::new(), last_speed_sample: None, selected: String::new(), checked: HashSet::new(), filter: 0, known_ids: None,
-        toast_until: None, preferences,
+        toast_until: None, preferences, clipboard: ClipboardWatcher::new(), clipboard_seq: 0,
+        order_key: 0, row_sig: Vec::new(), row_avail: Vec::new(),
     }));
     let mailbox = Arc::new(Mutex::new(Mailbox::default()));
     let sink = mailbox.clone();
@@ -579,6 +707,24 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
                toast(&ui, &state, "Transfer limits updated.", false);
            }
        }); }
+    macro_rules! queue_pause_action {
+        ($callback:ident, $paused:expr, $message:expr) => {{
+            let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
+            ui.$callback(move || if let Some(ui) = weak.upgrade() {
+                let id = state.borrow().selected.clone();
+                let queue = state.borrow().snapshot.downloads.iter()
+                    .find(|task| task.id == id).map(|task| task.queue.clone());
+                match queue {
+                    Some(name) if !name.is_empty() => {
+                        if send(&tx, Command::SetQueuePaused { name, paused: $paused }, &ui, &state) { toast(&ui, &state, $message, false); }
+                    }
+                    _ => toast(&ui, &state, "The Default queue cannot be paused individually. Use Pause all instead.", true),
+                }
+            });
+        }};
+    }
+    queue_pause_action!(on_pause_queue, true, "Queue paused.");
+    queue_pause_action!(on_resume_queue, false, "Queue resumed.");
      macro_rules! action {
         ($callback:ident, $variant:ident) => {{
             let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
@@ -595,8 +741,9 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
            ui.set_setting_speed(settings.speed_limit_kib.to_string().into());
            ui.set_setting_retries(settings.retries.to_string().into());
            ui.set_setting_queue_limits(settings.queue_speed_limits.iter().map(|(name, limit)| format!("{name}={limit}")).collect::<Vec<_>>().join("\n").into());
+           ui.set_setting_queue_config(settings.queues.iter().map(|(name, queue)| format!("{}|{}|{}", name, queue.priority, queue.category_dir)).collect::<Vec<_>>().join("\n").into());
            ui.set_setting_directory(settings.download_dir.into());
-          ui.set_setting_tray(settings.close_to_tray); ui.set_settings_open(true);
+          ui.set_setting_tray(settings.close_to_tray); ui.set_setting_clipboard(settings.clipboard_suggestions); ui.set_settings_open(true);
       }); }
     { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
       ui.on_save_settings(move || if let Some(ui) = weak.upgrade() {
@@ -621,6 +768,21 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
       }); }
     { let weak = ui.as_weak(); let state = state.clone();
       ui.on_dismiss_toast(move || if let Some(ui) = weak.upgrade() { ui.set_toast("".into()); state.borrow_mut().toast_until = None; }); }
+    { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
+      ui.on_clipboard_download(move || if let Some(ui) = weak.upgrade() {
+          let url = ui.get_clipboard_url().to_string();
+          ui.set_clipboard_visible(false);
+          match valid_url(&url) {
+              Ok(url) => { if send(&tx, Command::Add(AddRequest { url, ..Default::default() }), &ui, &state) { toast(&ui, &state, "Download added from the clipboard.", false); } }
+              Err(error) => toast(&ui, &state, error, true),
+          }
+      }); }
+    { let weak = ui.as_weak(); let state = state.clone();
+      ui.on_clipboard_dismiss(move || if let Some(ui) = weak.upgrade() {
+          let url = ui.get_clipboard_url().to_string();
+          state.borrow_mut().clipboard.dismiss(&url);
+          ui.set_clipboard_visible(false);
+      }); }
     ui.on_quit(|| { let _ = slint::quit_event_loop(); });
     { let weak = ui.as_weak(); tray.on_restore(move || if let Some(ui) = weak.upgrade() { show(&ui); }); }
     { let tx = command_tx.clone(); tray.on_pause_all(move || { let _ = tx.send(Command::PauseAll); }); }
@@ -679,6 +841,26 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
           }
           let expired = state.borrow().toast_until.is_some_and(|deadline| Instant::now() >= deadline);
           if expired { ui.set_toast("".into()); state.borrow_mut().toast_until = None; }
+          // Opt-in clipboard link detection. The OS change counter is polled cheaply
+          // every tick; clipboard text is only read when it actually changed, and only
+          // while the user has the feature enabled.
+          let clipboard_enabled = state.borrow().snapshot.settings.clipboard_suggestions;
+          if !clipboard_enabled {
+              if ui.get_clipboard_visible() { ui.set_clipboard_visible(false); }
+          } else {
+              let sequence = unsafe { GetClipboardSequenceNumber() } as u64;
+              let changed = { state.borrow().clipboard_seq != sequence };
+              if changed {
+                  let text = clipboard_text();
+                  let mut view = state.borrow_mut();
+                  view.clipboard_seq = sequence;
+                  if let Some(url) = view.clipboard.on_clipboard_change(text.as_deref()) {
+                      ui.set_clipboard_name(display_name(&url).into());
+                      ui.set_clipboard_url(url.into());
+                      ui.set_clipboard_visible(true);
+                  }
+              }
+          }
           if disconnected { let _ = slint::quit_event_loop(); }
       }); }
     tray.show().map_err(|e| e.to_string())?;
@@ -696,6 +878,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queue_configs_parse_priority_and_category_and_reject_bad_input() {
+        let map = parse_queue_configs("media|5|D:\\media\narchive|-2\n").unwrap();
+        assert_eq!(map.get("media").map(|q| (q.priority, q.category_dir.as_str())), Some((5, "D:\\media")));
+        assert_eq!(map.get("archive").map(|q| (q.priority, q.category_dir.clone())), Some((-2, String::new())));
+        assert!(map.get("media").unwrap().paused == false);
+        assert!(parse_queue_configs("   ").unwrap().is_empty());
+        assert!(parse_queue_configs("media|notanumber").is_err());
+        assert!(parse_queue_configs("bad=name|5").is_err());
+        assert!(parse_queue_configs("dup|1\ndup|2").is_err());
+    }
+
+    #[test]
     fn queue_speed_limits_parse_names_and_reject_duplicates() {
         let limits = parse_queue_speed_limits(" media =256\narchive=0\n").unwrap();
         assert_eq!(limits.get("media"), Some(&256));
@@ -703,6 +897,40 @@ mod tests {
         assert!(parse_queue_speed_limits("media=256\n media =512").is_err());
         assert!(parse_queue_speed_limits("missing separator").is_err());
         assert!(parse_queue_speed_limits("media=18446744073709551615").is_err());
+    }
+
+    #[test]
+    fn render_signature_tracks_every_visible_input_and_ignores_identity_only_changes() {
+        let base = TaskView { id: "a".into(), filename: "file.bin".into(), url: "https://h/x".into(),
+            status: "downloading".into(), downloaded_bytes: 100, total_bytes: Some(1000), speed_bps: 10, ..TaskView::default() };
+        let s = render_signature(&base, false, false);
+        assert_eq!(s, render_signature(&base, false, false), "identical inputs are stable");
+        let mut prog = base.clone(); prog.downloaded_bytes = 200;
+        assert_ne!(s, render_signature(&prog, false, false), "progress change must invalidate");
+        let mut done = base.clone(); done.status = "completed".into();
+        assert_ne!(s, render_signature(&done, false, false), "status change must invalidate");
+        assert_ne!(s, render_signature(&base, true, false), "checked must invalidate");
+        assert_ne!(s, render_signature(&base, false, true), "file availability must invalidate");
+    }
+
+    #[test]
+    fn build_item_maps_running_completed_and_verifying_states() {
+        let running = TaskView { id: "a".into(), filename: "app.zip".into(), url: "https://cdn.host/dir/app.zip".into(),
+            status: "downloading".into(), downloaded_bytes: 512, total_bytes: Some(1024), ..TaskView::default() };
+        let item = build_item(&running, false, false);
+        assert_eq!(item.name, "app.zip");
+        assert_eq!(item.status, "DOWNLOADING");
+        assert_eq!(item.progress, 0.5);
+        assert!(item.active && item.can_pause && !item.can_resume && !item.completed && !item.failed);
+        assert!(!item.stage_visible);
+        let completed = TaskView { status: "completed".into(), ..running.clone() };
+        let done = build_item(&completed, true, true);
+        assert_eq!(done.status, "Complete");
+        assert!(done.completed && !done.active && done.checked && done.file_available);
+        let verifying = TaskView { status: "verifying".into(), ..running.clone() };
+        let stage = build_item(&verifying, false, false);
+        assert!(stage.stage_visible && stage.stage_indeterminate);
+        assert_eq!(stage.stage_text, "VERIFYING");
     }
 
     #[test]

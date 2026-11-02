@@ -353,6 +353,8 @@ export component QdmWindow inherits Window {
     in property <string> selected-host: "Add a link above to get started.";
     in property <string> selected-status: "READY";
     in-out property <string> selected-queue;
+    in property <string> selected-queue-name;
+    in property <bool> selected-queue-paused: false;
     in-out property <string> selected-download-speed: "0";
     in property <string> selected-bytes: "0 B / —";
     in property <string> selected-speed: "—";
@@ -389,7 +391,12 @@ export component QdmWindow inherits Window {
     in-out property <string> setting-retries: "3";
     in-out property <string> setting-directory;
     in-out property <string> setting-queue-limits;
+    in-out property <string> setting-queue-config;
     in-out property <bool> setting-tray: true;
+    in-out property <bool> setting-clipboard: false;
+    in property <bool> clipboard-visible: false;
+    in property <string> clipboard-url;
+    in property <string> clipboard-name;
     in-out property <string> batch-urls;
     in-out property <string> batch-queue;
     in-out property <string> batch-speed-limit: "0";
@@ -426,10 +433,14 @@ export component QdmWindow inherits Window {
     callback scroll-downloads-to-top();
     callback save-settings();
     callback update-download-limits();
+    callback pause-queue();
+    callback resume-queue();
     callback open-integration();
     callback copy-token();
     callback open-extension();
     callback dismiss-toast();
+    callback clipboard-download();
+    callback clipboard-dismiss();
     callback quit();
     public function use-dark-palette() { Palette.color-scheme = ColorScheme.dark; }
 
@@ -744,9 +755,9 @@ export component QdmWindow inherits Window {
                 settings-scroll := ScrollView {
                     min-height: 100px; vertical-stretch: 1;
                     content-width: self.visible-width;
-                     content-height: max(self.visible-height, 548px);
+                    content-height: max(self.visible-height, 730px);
                      Rectangle {
-                         x: 0px; y: 0px; width: settings-scroll.visible-width; height: 548px;
+                         x: 0px; y: 0px; width: settings-scroll.visible-width; height: 730px;
                         Text { x: 0px; y: 0px; width: parent.width; height: 13px; text: "TRANSFER ENGINE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.3px; }
                         HorizontalLayout {
                             x: 0px; y: 26px; width: parent.width; height: 78px; spacing: 14px;
@@ -785,9 +796,13 @@ export component QdmWindow inherits Window {
                          TextField { x: 0px; y: 310px; width: parent.width; height: 40px; text <=> root.setting-directory; label: "Download folder"; }
                          GoldCheckBox { x: 0px; y: 368px; height: 22px; text: "Close to tray"; checked <=> root.setting-tray; }
                          GoldCheckBox { x: 0px; y: 400px; height: 22px; text: "Reduced motion"; checked <=> root.reduced-motion; }
-                         Text { x: 0px; y: 438px; width: parent.width; height: 14px; text: "QUEUE LIMITS · one per line: name=KiB/s"; color: Theme.gold; font-size: 12px; letter-spacing: 0.8px; }
-                         TextEdit { x: 0px; y: 460px; width: parent.width; height: 70px; text <=> root.setting-queue-limits; accessible-label: "Queue speed limits"; font-size: 12px; wrap: word-wrap; }
-                         Text { x: 0px; y: 532px; width: parent.width; height: 14px; text: "Default=256 applies to unassigned downloads · 0 = unlimited · max 256"; color: Theme.faint; font-size: 11px; }
+                         GoldCheckBox { x: 0px; y: 432px; height: 22px; text: "Suggest downloads from clipboard"; accessible-label: "Suggest downloads from clipboard"; checked <=> root.setting-clipboard; }
+                         Text { x: 0px; y: 470px; width: parent.width; height: 14px; text: "QUEUE LIMITS · one per line: name=KiB/s"; color: Theme.gold; font-size: 12px; letter-spacing: 0.8px; }
+                         TextEdit { x: 0px; y: 492px; width: parent.width; height: 70px; text <=> root.setting-queue-limits; accessible-label: "Queue speed limits"; font-size: 12px; wrap: word-wrap; }
+                         Text { x: 0px; y: 564px; width: parent.width; height: 14px; text: "Default=256 applies to unassigned downloads · 0 = unlimited · max 256"; color: Theme.faint; font-size: 11px; }
+                         Text { x: 0px; y: 590px; width: parent.width; height: 14px; text: "QUEUES · one per line: name|priority|folder"; color: Theme.gold; font-size: 12px; letter-spacing: 0.8px; }
+                         TextEdit { x: 0px; y: 612px; width: parent.width; height: 70px; text <=> root.setting-queue-config; accessible-label: "Queue configuration"; font-size: 12px; wrap: word-wrap; }
+                         Text { x: 0px; y: 684px; width: parent.width; height: 34px; text: "Higher priority starts first · folder is a per-queue category (absolute path) · blank fields use defaults · pause or resume a queue in Download Details"; color: Theme.faint; font-size: 11px; wrap: word-wrap; }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.edge; }
@@ -925,6 +940,12 @@ export component QdmWindow inherits Window {
                      Text { text: "Queue caps are set in Preferences."; color: Theme.faint; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
                      ActionButton { text: "Save limits"; compact: true; clicked => { root.update-download-limits(); } }
                  }
+                 HorizontalLayout {
+                     height: 30px; spacing: 8px;
+                     Text { text: "Queue: " + root.selected-queue-name; color: root.selected-queue-paused ? Theme.danger : Theme.muted; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                     if root.selected-queue-paused : ActionButton { text: "Resume queue"; compact: true; primary: true; a11y-label: "Resume this queue"; clicked => { root.resume-queue(); } }
+                     if !root.selected-queue-paused : ActionButton { text: "Pause queue"; compact: true; subtle: true; a11y-label: "Pause this queue"; clicked => { root.pause-queue(); } }
+                 }
                  if root.selected-notice != "" : TextEdit {
                     text: root.selected-notice; read-only: true;
                     accessible-label: "Transfer notice"; height: 74px; font-size: 13px; wrap: word-wrap;
@@ -976,6 +997,33 @@ export component QdmWindow inherits Window {
                     Text { text: root.integrity-label; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
                 }
                 if root.sha256 != "" : TextField { text: root.sha256; label: "SHA-256"; read-only: true; }
+            }
+        }
+    }
+    Rectangle {
+        visible: root.clipboard-visible || self.opacity > 0;
+        opacity: root.clipboard-visible ? 1 : 0;
+        x: 24px; y: parent.height - 258px + (root.clipboard-visible ? 0px : 10px);
+        width: parent.width - 48px; height: 76px;
+        border-radius: 10px; border-width: 1px; border-color: #8d7b56; background: #26261ff2;
+        animate y { duration: Theme.smooth; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+        animate opacity { duration: Theme.quick; }
+        // Non-modal: clicks here only act on the suggestion, never on the queue behind it.
+        TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; }
+        VerticalLayout {
+            padding: 12px; spacing: 6px;
+            HorizontalLayout {
+                spacing: 8px;
+                Glyph { kind: "link"; width: 16px; height: 16px; tint: Theme.gold; }
+                Text { text: "Copied link: " + root.clipboard-name; color: Theme.ink; font-size: 13px; font-weight: 600; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                IconButton { glyph: "close"; label: "Ignore clipboard link"; clicked => { root.clipboard-dismiss(); } }
+            }
+            Text { text: root.clipboard-url; color: Theme.faint; font-size: 11px; overflow: elide; }
+            HorizontalLayout {
+                height: 30px; spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                ActionButton { text: "Ignore"; compact: true; subtle: true; clicked => { root.clipboard-dismiss(); } }
+                ActionButton { text: "Download"; glyph: "download"; primary: true; compact: true; clicked => { root.clipboard-download(); } }
             }
         }
     }
