@@ -4,12 +4,19 @@ const token = document.getElementById('token');
 const port = document.getElementById('port');
 const message = document.getElementById('message');
 const capture = document.getElementById('auto-capture');
-api.storage.local.get({token:'',port:17876,autoCapture:false}).then(config=>{
-  token.value=config.token;port.value=config.port;capture.checked=!!config.autoCapture;
+const session = document.getElementById('forward-session');
+api.storage.local.get({token:'',port:17876,autoCapture:false,forwardSession:true}).then(config=>{
+  token.value=config.token;port.value=config.port;capture.checked=!!config.autoCapture;session.checked=config.forwardSession!==false;
 });
 capture.addEventListener('change',async()=>{
   await api.storage.local.set({autoCapture:capture.checked});
   message.textContent=capture.checked?'Automatic capture enabled. Chrome remains fallback.':'Automatic capture disabled.';
+});
+session.addEventListener('change',async()=>{
+  await api.storage.local.set({forwardSession:session.checked});
+  message.textContent=session.checked
+    ?'Session forwarding enabled. QDM receives cookies, referer and user agent for captured URLs.'
+    :'Session forwarding disabled. Protected sessions stay in Chrome.';
 });
 document.getElementById('connect').addEventListener('click',async()=>{
   try{

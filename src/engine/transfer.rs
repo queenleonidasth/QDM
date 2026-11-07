@@ -133,13 +133,17 @@ enum Fault {
     Transport(String, Duration),
     Restart(String),
     Fatal(String),
+    /// The origin answered, but it did not offer the file itself yet (a
+    /// challenge/landing page or a 202 while it prepares the payload). QDM
+    /// waits for the real file instead of saving the page or failing at once.
+    NotReady(String),
 }
 
 impl Fault {
     fn message(self) -> String {
         match self {
             Self::Stopped => "Paused".into(),
-            Self::Retry(s, _) | Self::Transport(s, _) | Self::Restart(s) | Self::Fatal(s) => s,
+            Self::Retry(s, _) | Self::Transport(s, _) | Self::Restart(s) | Self::Fatal(s) | Self::NotReady(s) => s,
         }
     }
 }
@@ -384,9 +388,83 @@ fn response_status(response: &Response) -> Result<(), Fault> {
     match status {
         200..=299=>Ok(()),
         408|425|429|500|502|503|504=>Err(Fault::Retry(format!("The server returned HTTP {status}"),protocol::retry_after(response.headers()))),
-        401|403=>Err(Fault::Fatal(format!("HTTP {status}: this link may have expired or require browser credentials. Use Refresh URL with a fresh link."))),
+        401|403=>Err(Fault::Fatal(format!("HTTP {status}: {}", access_denied_reason(response.headers())))),
         _=>Err(Fault::Fatal(format!("The server returned HTTP {status}"))),
     }
+}
+
+/// Cloudflare's managed challenge answers with `cf-mitigated: challenge` plus a
+/// JavaScript "Just a moment..." page. QDM has no browser engine to clear it, so
+/// name the real cause instead of implying the signed link expired.
+fn access_denied_reason(headers: &HeaderMap) -> &'static str {
+    if cloudflare_challenge(headers) {
+        "the site requires a Cloudflare browser check (\"Just a moment...\") that QDM cannot complete. Download the file in your browser, or use a direct link that does not require the check."
+    } else {
+        "this link may have expired or require browser credentials. Use Refresh URL with a fresh link."
+    }
+}
+
+fn cloudflare_challenge(headers: &HeaderMap) -> bool {
+    headers
+        .get("cf-mitigated")
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"challenge"))
+}
+
+// IDM waits for the real file instead of believing the first response: sites
+// answer with a landing/challenge page, a soft 404 page, or a 202 while they
+// generate the payload. Keep asking for a bounded window, then fail with the
+// last reason. The delays grow so a transient preparation resolves quickly.
+const FILE_WAIT_ROUNDS: u32 = 4;
+const FILE_WAIT_SECONDS: u64 = 3 + 6 + 12 + 20;
+
+fn file_wait_delay(round: u32) -> Duration {
+    if std::env::var("QDM_TEST_MODE").ok().as_deref() == Some("1") {
+        if let Some(ms) = std::env::var("QDM_FILE_WAIT_TEST_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            return Duration::from_millis(ms.max(10));
+        }
+    }
+    let seconds = match round {
+        0 => 3,
+        1 => 6,
+        2 => 12,
+        _ => 20,
+    };
+    Duration::from_secs(seconds)
+}
+
+/// True when the response body is a web page rather than the requested file.
+/// Explicit HTML documents and attachments remain downloadable; a page served
+/// for any other path is a landing, challenge, or error page.
+fn looks_like_web_page(headers: &HeaderMap, path: &str) -> bool {
+    let html = header_string(headers, "content-type")
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            value.starts_with("text/html") || value.starts_with("application/xhtml+xml")
+        })
+        .unwrap_or(false);
+    if !html { return false; }
+    let disposition = header_string(headers, "content-disposition");
+    if disposition.as_deref().and_then(disposition_filename).is_some() { return false; }
+    let path = path.to_ascii_lowercase();
+    !(path.ends_with(".html") || path.ends_with(".htm") || path.ends_with(".xhtml"))
+}
+
+/// Classify a response that is not the file yet so the caller can wait instead
+/// of writing the page into the download or failing on the first attempt.
+fn not_a_file_reason(status: u16, headers: &HeaderMap, path: &str) -> Option<String> {
+    if cloudflare_challenge(headers) {
+        return Some(access_denied_reason(headers).into());
+    }
+    if status == 202 {
+        return Some("The site accepted the request and is still preparing the file.".into());
+    }
+    if (200..=299).contains(&status) && looks_like_web_page(headers, path) {
+        return Some("The site returned a web page instead of the file.".into());
+    }
+    None
 }
 
 fn encoded(headers: &HeaderMap) -> bool {
@@ -1120,6 +1198,7 @@ impl Engine {
                             Err(Fault::Retry(_, _)) => Some("retry"),
                             Err(Fault::Restart(_)) => Some("restart"),
                             Err(Fault::Fatal(_)) => Some("fatal"),
+                            Err(Fault::NotReady(_)) => Some("not-ready"),
                             Ok(()) => None,
                         },
                     }));
@@ -1727,16 +1806,78 @@ impl Engine {
 
     async fn probe(&self, id: &str, stop: &mut Stop) -> Result<Probe, Fault> {
         let retries = lock(&self.inner.state).settings.retries;
-        for attempt in 0..=retries {
-            let result = self.probe_once(id, stop).await;
-            match result {
-                Err(Fault::Retry(message, delay) | Fault::Transport(message, delay)) if attempt < retries => {
-                    self.delay_retry(id, attempt, &message, delay, stop).await?
+        let mut retries_used = 0u8;
+        let mut wait_rounds = 0u32;
+        let mut waited = false;
+        loop {
+            match self.probe_once(id, stop).await {
+                Ok(probe) => {
+                    if waited { self.finish_file_wait(id); }
+                    return Ok(probe);
                 }
-                result => return result,
+                // IDM-style "waiting for the file": the site answered, but with
+                // a challenge/landing page or a temporary preparation response.
+                // Ask again for a bounded window before giving up.
+                Err(Fault::NotReady(reason)) if wait_rounds < FILE_WAIT_ROUNDS => {
+                    waited = true;
+                    self.file_wait_round(id, wait_rounds, &reason, stop).await?;
+                    wait_rounds += 1;
+                }
+                Err(Fault::NotReady(reason)) => {
+                    return Err(Fault::Fatal(format!(
+                        "{reason} The file was still unavailable after {FILE_WAIT_SECONDS} seconds of waiting."
+                    )));
+                }
+                Err(Fault::Retry(message, delay) | Fault::Transport(message, delay))
+                    if retries_used < retries =>
+                {
+                    self.delay_retry(id, retries_used, &message, delay, stop).await?;
+                    retries_used += 1;
+                }
+                Err(error) => return Err(error),
             }
         }
-        unreachable!()
+    }
+
+    /// Expose the wait as a real phase: the list shows WAITING FOR FILE and the
+    /// compact notification says what QDM is waiting for.
+    async fn file_wait_round(
+        &self,
+        id: &str,
+        round: u32,
+        reason: &str,
+        stop: &mut Stop,
+    ) -> Result<(), Fault> {
+        let delay = file_wait_delay(round);
+        {
+            let mut state = lock(&self.inner.state);
+            if let Some(task) = state.tasks.iter_mut().find(|task| task.view.id == id) {
+                task.view.status = "waiting".into();
+                task.view.speed_bps = 0;
+                task.view.notice = Some(format!(
+                    "Waiting for the file: {reason} Checking again in {:.0} seconds ({}/{}).",
+                    delay.as_secs_f64(),
+                    round + 1,
+                    FILE_WAIT_ROUNDS
+                ));
+            }
+        }
+        self.changed();
+        self.emit();
+        stop.check()?;
+        tokio::select! {biased;_=stop.wait()=>Err(Fault::Stopped),_=tokio::time::sleep(delay)=>Ok(())}
+    }
+
+    fn finish_file_wait(&self, id: &str) {
+        {
+            let mut state = lock(&self.inner.state);
+            if let Some(task) = state.tasks.iter_mut().find(|task| task.view.id == id) {
+                task.view.status = "downloading".into();
+                task.view.notice = None;
+            }
+        }
+        self.changed();
+        self.emit();
     }
 
     async fn probe_once(&self, id: &str, stop: &mut Stop) -> Result<Probe, Fault> {
@@ -1762,6 +1903,12 @@ impl Engine {
         {
             drop(response);
             return self.full_request(id, stop).await.map(Probe::Full);
+        }
+        if let Some(reason) =
+            not_a_file_reason(response.status().as_u16(), response.headers(), response.url().path())
+        {
+            drop(response);
+            return Err(Fault::NotReady(reason));
         }
         response_status(&response)?;
         if response.status().as_u16() == 200 {
@@ -1835,6 +1982,11 @@ impl Engine {
                 .send(),
         )
         .await?;
+        if let Some(reason) =
+            not_a_file_reason(response.status().as_u16(), response.headers(), response.url().path())
+        {
+            return Err(Fault::NotReady(reason));
+        }
         response_status(&response)?;
         if response.status().as_u16() != 200 {
             return Err(Fault::Fatal(
@@ -2295,6 +2447,42 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloudflare_browser_challenges_are_reported_as_such() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-mitigated", "challenge".parse().unwrap());
+        assert!(access_denied_reason(&headers).contains("Cloudflare browser check"));
+        // A challenge is a "wait for the file" answer, not the file.
+        assert!(not_a_file_reason(403, &headers, "/files-5GB-zip").is_some());
+        // An ordinary 403 keeps the actionable expired-link guidance.
+        assert!(access_denied_reason(&HeaderMap::new()).contains("expired"));
+    }
+
+    #[test]
+    fn pages_and_temporary_responses_wait_for_the_real_file() {
+        let mut html = HeaderMap::new();
+        html.insert("content-type", "text/html; charset=UTF-8".parse().unwrap());
+        // A landing/challenge page for a file path is not the file.
+        assert!(not_a_file_reason(200, &html, "/files-5GB-zip").is_some());
+        // A temporary preparation answer is retried, not downloaded.
+        assert!(not_a_file_reason(202, &HeaderMap::new(), "/report.pdf").is_some());
+        // Real HTML documents remain downloadable.
+        assert!(not_a_file_reason(200, &html, "/manual.html").is_none());
+        let mut attachment = html.clone();
+        attachment.insert("content-disposition", "attachment; filename=page.html".parse().unwrap());
+        assert!(not_a_file_reason(200, &attachment, "/export").is_none());
+        // Errors and ordinary binary payloads keep their existing behavior.
+        assert!(not_a_file_reason(404, &html, "/missing").is_none());
+        assert!(not_a_file_reason(200, &HeaderMap::new(), "/file.bin").is_none());
+    }
+
+    #[test]
+    fn file_wait_rounds_are_bounded_and_grow() {
+        let delays: Vec<Duration> = (0..FILE_WAIT_ROUNDS).map(file_wait_delay).collect();
+        assert!(delays.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(delays.iter().map(|delay| delay.as_secs()).sum::<u64>(), FILE_WAIT_SECONDS);
+    }
+
     #[test]
     fn durable_progress_renews_transport_retry_budget() {
         let mut part = super::Part::default();

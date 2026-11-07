@@ -30,13 +30,15 @@ A server without usable Range support is downloaded in one stream. Such a stream
 
 Transient failures have a bounded retry budget. The default is three retries, configurable up to eight. Retry-After is honored with a 120-second maximum per retry delay. Connection establishment has a 20-second timeout, response headers have a 30-second deadline, and body reads have a 45-second inactivity deadline. A running transfer has no arbitrary total-duration limit.
 
+A response that is not the file yet — a 202 preparation answer, a challenge/landing page, or Cloudflare's `cf-mitigated: challenge` answer — starts a visible **waiting for the file** phase instead of being saved as the download or failing at once. QDM re-probes four times with growing delays (3, 6, 12, and 20 seconds, 41 seconds total), then fails with the last reason. HTML documents requested explicitly (`.html`, `.htm`, `.xhtml`) and responses with an attachment filename remain ordinary downloads; an HTML page served for any other path is never written as the file. Ordinary 401/403 responses keep their immediate expired-link guidance.
+
 ## Publication and saved credentials
 
 Pieces are assembled into a unique temporary file in the destination folder using a bounded streaming buffer. The engine verifies the final length and optional expected SHA-256, then records a commit journal before publishing a final filename. Filename sanitization handles path separators, control characters, Windows reserved names, Unicode, and long-name collision suffixes.
 
 An existing destination is preserved. Windows publication uses a same-volume `MoveFileExW` operation without `REPLACE_EXISTING` or cross-volume copy fallback. Unix publication uses an exclusive hard link. A persisted journal allows startup to recognize an already-published file by its size and SHA-256 after an interrupted commit. These are recovery mechanisms; filesystem, device, and power-loss behavior still affect durability.
 
-Request headers such as browser credentials remain in memory and are not written to plaintext task history. URLs are persisted as part of the task, including any query parameters they contain. After restarting QDM, an authenticated download may require fresh browser context. Replacing a URL checks existing pieces before reuse; ordinary URL replacement drops retained headers when the origin changes. Embedded credentials in URLs are rejected in favor of explicit request headers.
+Request headers such as browser credentials remain in memory and are not written to plaintext task history. The optional browser extension session forwarding sends the captured URL's cookies, referer and user agent through the authenticated loopback bridge; they become ordinary per-task request headers, are sent with probes and every worker request, and are removed on cross-host redirects. URLs are persisted as part of the task, including any query parameters they contain. After restarting QDM, an authenticated download may require fresh browser context. Replacing a URL checks existing pieces before reuse; ordinary URL replacement drops retained headers when the origin changes. Embedded credentials in URLs are rejected in favor of explicit request headers.
 
 ## Resource behavior and scope
 

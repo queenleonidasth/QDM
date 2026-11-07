@@ -4,10 +4,11 @@
 <h1>Browser integration</h1>
 <p>QDM can capture ordinary Chrome downloads after the native manager confirms acceptance. If the manager is unavailable, Chrome keeps the original download. Capture is off by default.</p>
 <label><input type="checkbox" id="auto-capture" style="display:inline;width:auto;margin-right:8px"> Automatically capture eligible downloads</label>
+<label><input type="checkbox" id="forward-session" style="display:inline;width:auto;margin-right:8px"> Send my browser session with captured downloads</label>
 <button id="connect">Connect using QDM native host</button>
 <p id="message" role="status"></p>
 <details><summary>Manual pairing fallback</summary><form id="pair-form">
 <label>Pairing token<input id="token" type="password" autocomplete="off" minlength="64" maxlength="64"></label>
 <label>Local port<input id="port" type="number" min="17876" max="17885" value="17876"></label>
 <button type="submit" class="secondary">Save manual pairing</button></form></details>
-<p class="note">Session cookies and Authorization headers are not copied automatically. Protected sessions remain in the browser.</p></main><script src="options.js"></script></body></html>
+<p class="note">With session forwarding enabled, QDM receives the cookies for the captured URL, the referring page and your browser user agent over localhost. QDM keeps them in memory only and never writes them to download history. Turn it off to keep protected sessions in the browser.</p></main><script src="options.js"></script></body></html>

@@ -3,15 +3,23 @@ const api = globalThis.browser || chrome;
 const token = document.getElementById('token');
 const port = document.getElementById('port');
 const toggle = document.getElementById('autoCapture');
+const sessionToggle = document.getElementById('forwardSession');
 const message = document.getElementById('message');
-api.storage.local.get({ token: '', port: 17876, autoCapture: true }).then(config => {
+api.storage.local.get({ token: '', port: 17876, autoCapture: true, forwardSession: true }).then(config => {
   token.value = config.token;
   port.value = config.port;
   toggle.checked = config.autoCapture;
+  sessionToggle.checked = config.forwardSession !== false;
 });
 toggle.addEventListener('change', async () => {
   await api.storage.local.set({ autoCapture: toggle.checked });
   message.textContent = toggle.checked ? 'เปิดดักดาวน์โหลดอัตโนมัติแล้ว' : 'ปิดดักดาวน์โหลดอัตโนมัติแล้ว';
+});
+sessionToggle.addEventListener('change', async () => {
+  await api.storage.local.set({ forwardSession: sessionToggle.checked });
+  message.textContent = sessionToggle.checked
+    ? 'เปิดส่ง session แล้ว — QDM จะได้รับคุกกี้/Referer/User-Agent ของไฟล์ที่ดัก'
+    : 'ปิดส่ง session แล้ว — เว็บที่ต้องล็อกอินจะเก็บ session ไว้ในเบราว์เซอร์';
 });
 document.getElementById('pair-form').addEventListener('submit', async event => {
   event.preventDefault();

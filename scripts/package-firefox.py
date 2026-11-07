@@ -7,9 +7,14 @@ import zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
 source = root / "extensions" / "firefox"
 manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8-sig"))
-assert manifest["version"] == "0.3.1"
+assert manifest["version"] == "0.4.1"
 assert manifest["browser_specific_settings"]["gecko"]["id"] == "qdm@queen.local"
-assert set(manifest["permissions"]) == {"downloads", "contextMenus", "storage", "nativeMessaging", "http://127.0.0.1/*"}
+assert set(manifest["permissions"]) == {
+    "downloads", "contextMenus", "storage", "nativeMessaging", "cookies",
+    "<all_urls>", "http://127.0.0.1/*",
+}
+assert manifest["background"]["scripts"] == ["session.js", "background.js"]
+assert (source / "session.js").is_file()
 release = root / "release"
 release.mkdir(exist_ok=True)
 output = release / ("QDM-Zen-AutoCapture-" + manifest["version"] + ".xpi")

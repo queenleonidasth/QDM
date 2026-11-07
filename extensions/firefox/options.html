@@ -8,6 +8,7 @@
 <p>Zen เชื่อมต่อ QDM อัตโนมัติผ่านตัวช่วยในเครื่อง และเชื่อมต่อใหม่ได้หลังรีสตาร์ตโดยไม่ต้องกรอกรหัส</p>
 <button id="check-connection" type="button">ตรวจสอบและเชื่อมต่ออัตโนมัติ</button>
 <label class="toggle"><input id="autoCapture" type="checkbox" checked> ดักดาวน์โหลดอัตโนมัติเมื่อคลิกไฟล์</label>
+<label class="toggle"><input id="forwardSession" type="checkbox" checked> ส่ง session ของเบราว์เซอร์ไปกับไฟล์ที่ดัก (คุกกี้ / Referer / User-Agent)</label>
 <h2>ตั้งค่าด้วยตนเอง (เฉพาะเมื่อการเชื่อมต่ออัตโนมัติใช้ไม่ได้)</h2>
 <form id="pair-form">
 <label>รหัสจับคู่<input id="token" type="password" autocomplete="off" required minlength="64" maxlength="64"></label>
@@ -17,5 +18,5 @@
 <p id="message" role="status"></p>
 <div class="note">เปิด QDM → ⋯ → เชื่อมเบราว์เซอร์ เพื่อดูรหัสจับคู่และพอร์ต<br>
 QDM ต้องเปิดอยู่ หาก QDM ไม่ตอบรับ Zen จะดาวน์โหลดต่อเองตามปกติ<br>
-ไม่ส่งคุกกี้หรือรหัสผ่านเว็บไซต์ บางเว็บที่ต้องล็อกอินอาจใช้ QDM ไม่ได้</div>
+หากรวบรวม session เปิดอยู่ QDM จะได้รับคุกกี้ของ URL ที่ดัก หน้าอ้างอิง และ User-Agent ผ่าน localhost โดยเก็บไว้ในหน่วยความจำเท่านั้น ไม่เขียนลงประวัติ — ปิดตัวเลือกนี้หากไม่ต้องการให้ส่งคุกกี้</div>
 </main><script src="options.js"></script></body></html>

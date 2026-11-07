@@ -326,6 +326,86 @@ export component QdmTray inherits SystemTrayIcon {
     }
 }
 
+// Independent window: Rust owns its lifetime and completion queue, so it also
+// works while the main window is hidden in the tray.
+export component CompletionPopup inherits Window {
+    title: "Download complete — QDM";
+    no-frame: true;
+    // Transparent padding around the panel leaves room for the soft shadow and
+    // the macOS-style rounded corners. Rust animates the window height between
+    // the compact transfer card and the full completion card.
+    preferred-width: 452px; preferred-height: 124px;
+    min-width: 452px; max-width: 452px; min-height: 124px; max-height: 248px;
+    background: transparent; default-font-family: "Segoe UI Variable";
+    icon: @image-url("../resources/qdm-crown.svg");
+    // 0 = live transfer card, 1 = completed download card. Rust drives this
+    // value frame-by-frame so the content crossfade matches the window growth.
+    in property <float> morph: 0;
+    in property <string> transfer-name;
+    in property <string> transfer-size;
+    in property <float> transfer-progress: 0;
+    in property <string> completion-name;
+    in property <string> completion-path;
+    // Number of additional completions waiting behind the current item.
+    in property <int> completion-remaining: 0;
+    callback open-file();
+    callback open-folder();
+    callback dismiss();
+    callback view-details();
+    callback close-progress();
+    Rectangle {
+        x: 16px; y: 16px; width: parent.width - 32px;
+        height: 92px + (124px * root.morph);
+        border-radius: 18px;
+        background: Theme.panel; border-width: 1px; border-color: Theme.edge;
+        drop-shadow-blur: 12px; drop-shadow-color: #00000066; drop-shadow-offset-y: 3px;
+        clip: true;
+
+        // Live transfer: only the name, file size and a gold progress bar, plus
+        // the two explicit actions the user asked for: dismiss this notification
+        // or open the full QDM window on this download.
+        Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: 92px;
+            visible: root.morph < 0.46;
+            opacity: max(0, 1 - root.morph * 2.2);
+            Text { x: 20px; y: 15px; width: parent.width - 174px; height: 22px; text: root.transfer-name; color: Theme.ink; font-size: 15px; font-weight: 600; overflow: elide; }
+            Text { x: 20px; y: 39px; width: parent.width - 84px; height: 18px; text: root.transfer-size; color: Theme.muted; font-size: 12px; overflow: elide; }
+            Rectangle { x: 20px; y: 66px; width: parent.width - 40px; height: 6px; border-radius: 3px; background: #383c35; }
+            Rectangle {
+                x: 20px; y: 66px; width: (parent.width - 40px) * max(0, min(1, root.transfer-progress)); height: 6px;
+                border-radius: 3px; background: Theme.gold;
+                animate width { duration: 220ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+            }
+            // Keep the compact controls out of the completion card's hit area.
+            IconButton { visible: root.morph < 0.05; x: parent.width - 46px; y: 6px; glyph: "close"; label: "Dismiss transfer notification"; clicked => { root.close-progress(); } }
+            ActionButton { visible: root.morph < 0.05; x: parent.width - 142px; y: 9px; width: 90px; height: 29px; compact: true; subtle: true; text: "Details"; clicked => { root.view-details(); } }
+        }
+
+        // Completed download. It fades in while the card grows, so completion
+        // does not replay the entrance bounce. Hidden while compact so its
+        // controls cannot capture clicks through the transfer card.
+        Rectangle {
+            x: 0px; y: 6px * (1 - root.morph); width: parent.width; height: 216px;
+            visible: root.morph > 0.30;
+            opacity: clamp((root.morph - 0.30) / 0.70, 0, 1);
+            Rectangle {
+                x: 20px; y: 19px; width: 36px; height: 36px;
+                border-radius: 18px; background: #403727;
+                Glyph { x: 9px; y: 9px; kind: "check"; tint: Theme.gold; }
+            }
+            Text { x: 68px; y: 18px; width: 280px; height: 20px; text: "DOWNLOAD COMPLETE"; color: Theme.gold; font-size: 11px; font-weight: 650; letter-spacing: 0.8px; }
+            Text { x: 68px; y: 38px; width: 280px; height: 20px; text: root.completion-remaining > 0 ? root.completion-remaining + " more waiting" : "Ready to open"; color: Theme.muted; font-size: 12px; }
+            IconButton { x: parent.width - 54px; y: 15px; glyph: "close"; label: "Dismiss completion"; clicked => { root.dismiss(); } }
+            Text { x: 20px; y: 75px; width: parent.width - 40px; height: 23px; text: root.completion-name; color: Theme.ink; font-size: 16px; font-weight: 600; overflow: elide; }
+            Text { x: 20px; y: 104px; width: parent.width - 40px; height: 20px; text: root.completion-path; color: Theme.muted; font-size: 12px; overflow: elide; }
+            Rectangle { x: 20px; y: 135px; width: parent.width - 40px; height: 1px; background: Theme.edge; }
+            ActionButton { x: 20px; y: 155px; width: 110px; height: 37px; text: "Open file"; primary: true; clicked => { root.open-file(); } }
+            ActionButton { x: 138px; y: 155px; width: 120px; height: 37px; text: "Open folder"; clicked => { root.open-folder(); } }
+            ActionButton { x: 286px; y: 155px; width: 110px; height: 37px; text: "Dismiss"; subtle: true; clicked => { root.dismiss(); } }
+        }
+    }
+}
+
 export component QdmWindow inherits Window {
     title: "QDM " + root.version-label + " - QUEEN Download Manager";
     preferred-width: 480px; preferred-height: 900px;

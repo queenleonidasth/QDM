@@ -230,6 +230,47 @@ async fn serve(
         )
         .await;
     }
+    if method == "GET" && route.starts_with("/task-status") {
+        // The browser extension only cancels its own copy after QDM has really
+        // started receiving bytes. A challenge or auth failure leaves the
+        // browser's working download untouched.
+        let id = route
+            .split_once('?')
+            .map(|(_, query)| query)
+            .and_then(|query| {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("id="))
+            })
+            .unwrap_or("");
+        let snapshot = engine.snapshot();
+        return match snapshot.downloads.iter().find(|task| task.id == id) {
+            Some(task) => {
+                reply(
+                    &mut socket,
+                    200,
+                    json!({
+                        "id": task.id,
+                        "status": task.status,
+                        "downloadedBytes": task.downloaded_bytes,
+                        "totalBytes": task.total_bytes,
+                        "error": task.error,
+                    }),
+                    &origin,
+                )
+                .await
+            }
+            None => {
+                reply(
+                    &mut socket,
+                    404,
+                    json!({"error":"Unknown download"}),
+                    &origin,
+                )
+                .await
+            }
+        };
+    }
     if method == "GET" && route == "/health" {
         return reply(
             &mut socket,

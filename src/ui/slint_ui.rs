@@ -1,4 +1,4 @@
-﻿//! Slint presentation layer. Network, hashing and persistence stay on the engine
+//! Slint presentation layer. Network, hashing and persistence stay on the engine
 //! threads. A bounded mailbox coalesces snapshots; stable models preserve scroll,
 //! selection and interaction animations while telemetry changes.
 #![cfg(windows)]
@@ -21,10 +21,10 @@ use windows_sys::Win32::{
     Foundation::{GlobalFree, HWND, RECT},
     Graphics::{
         Dwm::DwmSetWindowAttribute,
-        Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST},
+        Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, MONITOR_DEFAULTTONEAREST},
     },
     System::{DataExchange::*, Memory::*},
-    UI::WindowsAndMessaging::*,
+    UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
 };
 
 slint::include_modules!();
@@ -34,7 +34,14 @@ slint::include_modules!();
 struct Appearance { reduced_motion: bool }
 
 #[derive(Default)]
-struct Mailbox { latest: Option<Snapshot>, events: Vec<UiEvent>, disconnected: bool }
+struct Mailbox {
+    latest: Option<Snapshot>,
+    events: Vec<UiEvent>,
+    disconnected: bool,
+    has_snapshot: bool,
+    last_statuses: HashMap<String, String>,
+    pending_completions: Vec<Completion>,
+}
 
 struct ViewState {
     snapshot: Snapshot,
@@ -58,6 +65,445 @@ struct ViewState {
     row_avail: Vec<bool>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Completion {
+    id: String,
+    filename: String,
+    file_path: Option<String>,
+}
+
+// Matches the transparent inset around CompletionPopup's rounded panel.
+const POPUP_PADDING: i32 = 16;
+const POPUP_EDGE_MARGIN: i32 = 16;
+// Outer window sizes: 16px of transparent shadow padding around the panel.
+const POPUP_WIDTH: i32 = 452;
+const POPUP_COMPACT_HEIGHT: i32 = 124;
+const POPUP_FULL_HEIGHT: i32 = 248;
+const POPUP_MORPH: Duration = Duration::from_millis(420);
+// Completed downloads linger briefly, then retract unless the user interacts.
+const COMPLETION_LINGER: Duration = Duration::from_secs(10);
+
+fn popup_logical_height(morph: f32) -> f32 {
+    let morph = morph.clamp(0.0, 1.0);
+    POPUP_COMPACT_HEIGHT as f32 + (POPUP_FULL_HEIGHT - POPUP_COMPACT_HEIGHT) as f32 * morph
+}
+
+/// Resize the popup window to match the current card height. The panel top
+/// stays anchored, so the card grows downward from the notification corner.
+fn set_popup_size(popup: &CompletionPopup, morph: f32) {
+    popup.window().set_size(slint::LogicalSize::new(POPUP_WIDTH as f32, popup_logical_height(morph)));
+}
+
+struct SlideState {
+    popup: slint::Weak<CompletionPopup>,
+    generation: u64,
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+    started: Instant,
+    duration: Duration,
+}
+
+struct MorphState {
+    popup: slint::Weak<CompletionPopup>,
+    generation: u64,
+    from: f32,
+    to: f32,
+    started: Instant,
+    duration: Duration,
+}
+
+/// Drives the in-place transformation between the compact transfer card and
+/// the completion card. It only changes the height and content crossfade; the
+/// window position is left untouched so the notification never re-enters.
+struct PopupMorph {
+    state: Rc<RefCell<Option<MorphState>>>,
+    generation: Cell<u64>,
+    reduced_motion: Cell<bool>,
+}
+
+impl PopupMorph {
+    fn new() -> Self {
+        Self { state: Rc::new(RefCell::new(None)), generation: Cell::new(0), reduced_motion: Cell::new(false) }
+    }
+
+    fn start(&self, popup: &CompletionPopup, to: f32) {
+        let to = to.clamp(0.0, 1.0);
+        let from = popup.get_morph();
+        if (from - to).abs() < f32::EPSILON {
+            set_popup_size(popup, to);
+            return;
+        }
+        if self.reduced_motion.get() {
+            popup.set_morph(to);
+            set_popup_size(popup, to);
+            return;
+        }
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+        *self.state.borrow_mut() = Some(MorphState {
+            popup: popup.as_weak(),
+            generation,
+            from,
+            to,
+            started: Instant::now(),
+            duration: POPUP_MORPH,
+        });
+        drive_morph(self.state.clone(), generation);
+    }
+}
+
+fn drive_morph(state: Rc<RefCell<Option<MorphState>>>, generation: u64) {
+    Timer::single_shot(Duration::from_millis(16), move || {
+        let (popup, value, done) = {
+            let mut slot = state.borrow_mut();
+            let Some(animation) = slot.as_ref() else { return; };
+            if animation.generation != generation { return; }
+            let progress = (animation.started.elapsed().as_secs_f32() / animation.duration.as_secs_f32()).clamp(0.0, 1.0);
+            let done = progress >= 1.0;
+            // Smooth ease-in-out: the completed card expands once without the
+            // entrance spring, so a finish never looks like a new notification.
+            let eased = if progress < 0.5 {
+                4.0 * progress * progress * progress
+            } else {
+                1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+            };
+            let value = animation.from + (animation.to - animation.from) * eased;
+            let popup = animation.popup.clone();
+            if done { *slot = None; }
+            (popup, value, done)
+        };
+        let Some(popup) = popup.upgrade() else {
+            *state.borrow_mut() = None;
+            return;
+        };
+        if !popup.window().is_visible() {
+            *state.borrow_mut() = None;
+            return;
+        }
+        popup.set_morph(value);
+        set_popup_size(&popup, value);
+        if !done { drive_morph(state, generation); }
+    });
+}
+
+/// Drives the macOS-style drop-in for the completion notification. The popup
+/// window is positioned on the active monitor's work area, then eased down from
+/// just above the screen. Slint timers keep the animation on the UI thread.
+struct PopupSlide {
+    state: Rc<RefCell<Option<SlideState>>>,
+    generation: Cell<u64>,
+    anchor: Cell<Option<HWND>>,
+    reduced_motion: Cell<bool>,
+}
+
+impl PopupSlide {
+    fn new() -> Self {
+        Self {
+            state: Rc::new(RefCell::new(None)),
+            generation: Cell::new(0),
+            anchor: Cell::new(None),
+            reduced_motion: Cell::new(false),
+        }
+    }
+
+    /// Move the window off-screen above its final position before it is shown,
+    /// so the first painted frame is already hidden.
+    fn prepare(&self, popup: &CompletionPopup) {
+        if self.reduced_motion.get() { return; }
+        let anchor = self.anchor.get();
+        let Some(work) = monitor_work_area(anchor) else { return; };
+        let (width, height) = popup_window_size(popup, anchor);
+        let work_width = work.right - work.left;
+        let x = work.left + (work_width - width).max(0) / 2;
+        let y = work.top - height - 64;
+        popup.window().set_position(slint::PhysicalPosition::new(x, y));
+    }
+
+    fn start(&self, popup: &CompletionPopup) {
+        let Some(work) = monitor_work_area(self.anchor.get()) else { return; };
+        let Some(hwnd) = window_handle(&popup.window()) else { return; };
+        let (width, height) = popup_window_size(popup, self.anchor.get());
+        let work_width = work.right - work.left;
+        let margin = scale_for_dpi(POPUP_EDGE_MARGIN, hwnd);
+        let padding = scale_for_dpi(POPUP_PADDING, hwnd);
+        let target_x = work.left + (work_width - width).max(0) / 2;
+        // The visible panel starts `margin` below the work-area edge; the
+        // transparent shadow padding above it is allowed to sit off-screen.
+        let target_y = work.top + margin - padding;
+        if self.reduced_motion.get() {
+            popup.window().set_position(slint::PhysicalPosition::new(target_x, target_y));
+            return;
+        }
+        let start_y = target_y - height;
+        popup.window().set_position(slint::PhysicalPosition::new(target_x, start_y));
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+        *self.state.borrow_mut() = Some(SlideState {
+            popup: popup.as_weak(),
+            generation,
+            from_x: target_x,
+            from_y: start_y,
+            to_x: target_x,
+            to_y: target_y,
+            started: Instant::now(),
+            duration: Duration::from_millis(680),
+        });
+        drive_slide(self.state.clone(), generation);
+    }
+}
+
+fn drive_slide(state: Rc<RefCell<Option<SlideState>>>, generation: u64) {
+    Timer::single_shot(Duration::from_millis(16), move || {
+        let (popup, x, y, done) = {
+            let mut slot = state.borrow_mut();
+            let Some(animation) = slot.as_ref() else { return; };
+            if animation.generation != generation { return; }
+            let progress = (animation.started.elapsed().as_secs_f32() / animation.duration.as_secs_f32()).clamp(0.0, 1.0);
+            let done = progress >= 1.0;
+            // Under-damped spring step response: a quick drop followed by a
+            // small macOS-like settle instead of a flat ease-out.
+            let (x, y) = if done {
+                (animation.to_x, animation.to_y)
+            } else {
+                let zeta = 0.70f32;
+                let omega = 14.0f32;
+                let omega_d = omega * (1.0 - zeta * zeta).sqrt();
+                let t = progress * animation.duration.as_secs_f32();
+                let envelope = (-zeta * omega * t).exp();
+                let eased = 1.0 - envelope * ((omega_d * t).cos() + (zeta * omega / omega_d) * (omega_d * t).sin());
+                let x = animation.from_x + ((animation.to_x - animation.from_x) as f32 * eased).round() as i32;
+                let y = animation.from_y + ((animation.to_y - animation.from_y) as f32 * eased).round() as i32;
+                (x, y)
+            };
+            let popup = animation.popup.clone();
+            if done { *slot = None; }
+            (popup, x, y, done)
+        };
+        let Some(popup) = popup.upgrade() else {
+            *state.borrow_mut() = None;
+            return;
+        };
+        if !popup.window().is_visible() {
+            *state.borrow_mut() = None;
+            return;
+        }
+        popup.window().set_position(slint::PhysicalPosition::new(x, y));
+        if !done { drive_slide(state, generation); }
+    });
+}
+
+fn monitor_work_area(anchor: Option<HWND>) -> Option<RECT> {
+    unsafe {
+        let monitor = match anchor {
+            Some(handle) => MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST),
+            None => MonitorFromWindow(std::ptr::null_mut(), MONITOR_DEFAULTTOPRIMARY),
+        };
+        if monitor.is_null() { return None; }
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) == 0 { return None; }
+        Some(info.rcWork)
+    }
+}
+
+fn window_handle(window: &slint::Window) -> Option<HWND> {
+    let raw = window.window_handle().window_handle().ok()?.as_raw();
+    match raw { RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as HWND), _ => None }
+}
+
+fn window_size(window: &slint::Window) -> Option<(i32, i32)> {
+    let handle = window_handle(window)?;
+    let mut bounds: RECT = unsafe { std::mem::zeroed() };
+    unsafe { if GetWindowRect(handle, &mut bounds) == 0 { return None; } }
+    Some((bounds.right - bounds.left, bounds.bottom - bounds.top))
+}
+
+/// Current physical size of the notification window. The adapter's cached size
+/// is authoritative right after `set_size`, while `GetWindowRect` can lag by a
+/// frame on Windows. Fall back to the logical card size before the window exists.
+fn popup_window_size(popup: &CompletionPopup, anchor: Option<HWND>) -> (i32, i32) {
+    let physical = popup.window().size();
+    if physical.width > 0 && physical.height > 0 {
+        return (physical.width as i32, physical.height as i32);
+    }
+    if let Some(size) = window_size(&popup.window()) { return size; }
+    let scale = anchor.map_or_else(|| popup.window().scale_factor(), |handle| scale_for_dpi(96, handle) as f32 / 96.0);
+    (((POPUP_WIDTH as f32) * scale).ceil() as i32, (popup_logical_height(popup.get_morph()) * scale).ceil() as i32)
+}
+
+fn scale_for_dpi(value: i32, handle: HWND) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(handle) };
+    if dpi == 0 { value } else { (value as f32 * dpi as f32 / 96.0).round() as i32 }
+}
+
+fn completed_transitions(
+    previous_statuses: &HashMap<String, String>,
+    tasks: &[TaskView],
+    is_initial_snapshot: bool,
+) -> Vec<Completion> {
+    if is_initial_snapshot {
+        return Vec::new();
+    }
+    tasks
+        .iter()
+        .filter(|task| {
+            task.status == "completed"
+                && previous_statuses
+                    .get(&task.id)
+                    .map_or(true, |status| status != "completed")
+        })
+        .map(|task| Completion { id: task.id.clone(), filename: task.filename.clone(), file_path: task.file_path.clone() })
+        .collect()
+}
+
+fn transfer_size_label(task: &TaskView) -> String {
+    if task.status == "waiting" { return "Waiting for the file…".into(); }
+    match task.total_bytes {
+        Some(total) if total > 0 => format!("{} of {}", human(task.downloaded_bytes), human(total)),
+        // The probe has not resolved a total yet: report progress without implying the file is empty.
+        _ if task.downloaded_bytes == 0 => "Preparing download".into(),
+        _ => human(task.downloaded_bytes),
+    }
+}
+
+fn progress_rank(status: &str) -> u8 {
+    match status {
+        "downloading" | "preparing" | "probing" | "assembling" | "verifying" => 2,
+        "queued" | "waiting" => 1,
+        _ => 0,
+    }
+}
+
+/// Pick the transfer the compact notification should represent. The current
+/// target is kept while it is still running so the card does not jump between
+/// downloads; otherwise the most recently started active task wins.
+fn progress_task(snapshot: &Snapshot, current: Option<&str>) -> Option<TaskView> {
+    if let Some(id) = current {
+        if let Some(task) = snapshot.downloads.iter().find(|task| task.id == id) {
+            if running(&task.status) { return Some(task.clone()); }
+        }
+    }
+    snapshot
+        .downloads
+        .iter()
+        .filter(|task| running(&task.status))
+        .max_by_key(|task| (progress_rank(&task.status), task.created_at))
+        .cloned()
+}
+
+fn fill_progress(popup: &CompletionPopup, task: &TaskView) {
+    popup.set_transfer_name(task.filename.clone().into());
+    popup.set_transfer_size(transfer_size_label(task).into());
+    popup.set_transfer_progress(fraction(task.downloaded_bytes, task.total_bytes.unwrap_or(0)));
+}
+
+/// Paint the compact transfer card. When it is already on screen this only
+/// refreshes the name, size and progress bar; the entrance animation is never
+/// replayed for progress updates.
+fn present_progress(popup: &CompletionPopup, task: &TaskView, slide: &PopupSlide) -> bool {
+    fill_progress(popup, task);
+    if popup.window().is_visible() { return true; }
+    popup.set_morph(0.0);
+    set_popup_size(popup, 0.0);
+    slide.prepare(popup);
+    match popup.show() {
+        Ok(()) => {
+            slide.start(popup);
+            true
+        }
+        Err(error) => {
+            eprintln!("Could not show transfer popup; QDM will retry: {error}");
+            false
+        }
+    }
+}
+
+fn fill_completion(popup: &CompletionPopup, item: &Completion, remaining: usize) {
+    popup.set_completion_name(item.filename.clone().into());
+    popup.set_completion_path(item.file_path.clone().unwrap_or_else(|| "File path unavailable".into()).into());
+    popup.set_completion_remaining(remaining.min(i32::MAX as usize) as i32);
+}
+
+/// Paint the completion card. If the compact transfer card is already on
+/// screen, the same window grows into the completion card instead of replaying
+/// the entrance, so a finished download never looks like a new notification.
+fn present_completion(
+    popup: &CompletionPopup,
+    queue: &VecDeque<Completion>,
+    slide: &PopupSlide,
+    morph: &PopupMorph,
+) -> bool {
+    let Some(item) = queue.front() else {
+        let _ = popup.hide();
+        return true;
+    };
+    fill_completion(popup, item, queue.len().saturating_sub(1));
+    if popup.window().is_visible() {
+        if let Some(handle) = window_handle(&popup.window()) {
+            unsafe { if IsIconic(handle) != 0 { ShowWindow(handle, SW_RESTORE); } }
+        }
+        // Only the card height and the content crossfade animate; the window
+        // keeps its position and never re-enters.
+        morph.start(popup, 1.0);
+        return true;
+    }
+    popup.set_morph(1.0);
+    set_popup_size(popup, 1.0);
+    slide.prepare(popup);
+    match popup.show() {
+        Ok(()) => {
+            slide.start(popup);
+            true
+        }
+        Err(error) => {
+            eprintln!("Could not show completion popup; QDM will retry: {error}");
+            false
+        }
+    }
+}
+
+/// Advance past the visible completion. When no completions remain but another
+/// download is still running, the same window transforms back into the compact
+/// transfer card instead of hiding and bouncing in again.
+fn dismiss_notification(
+    popup: &CompletionPopup,
+    queue: &Rc<RefCell<VecDeque<Completion>>>,
+    shown: &Rc<Cell<bool>>,
+    slide: &PopupSlide,
+    morph: &PopupMorph,
+    progress_id: &RefCell<Option<String>>,
+    progress_dismissed: &RefCell<Option<String>>,
+    completion_until: &Cell<Option<Instant>>,
+    snapshot: &Snapshot,
+) {
+    queue.borrow_mut().pop_front();
+    if queue.borrow().is_empty() {
+        completion_until.set(None);
+        if let Some(task) = progress_task(snapshot, None) {
+            *progress_id.borrow_mut() = Some(task.id.clone());
+            if progress_dismissed.borrow().as_deref() == Some(task.id.as_str()) {
+                // The user already closed this transfer's notification.
+                let _ = popup.hide();
+                shown.set(true);
+            } else {
+                fill_progress(popup, &task);
+                morph.start(popup, 0.0);
+                shown.set(true);
+            }
+        } else {
+            *progress_id.borrow_mut() = None;
+            let _ = popup.hide();
+            shown.set(true);
+        }
+    } else {
+        let presented = present_completion(popup, &queue.borrow(), slide, morph);
+        shown.set(presented);
+        if presented { completion_until.set(Some(Instant::now() + COMPLETION_LINGER)); }
+    }
+}
+
 fn human(value: u64) -> String {
     let mut n = value as f64;
     let mut index = 0;
@@ -69,7 +515,7 @@ fn fraction(done: u64, total: u64) -> f32 {
     if total == 0 { 0. } else { (done as f64 / total as f64).clamp(0., 1.) as f32 }
 }
 fn running(status: &str) -> bool {
-    matches!(status, "queued" | "downloading" | "preparing" | "probing" | "assembling" | "verifying")
+    matches!(status, "queued" | "waiting" | "downloading" | "preparing" | "probing" | "assembling" | "verifying")
 }
 fn resumable_status(status: &str) -> bool {
     matches!(status, "paused" | "error" | "failed" | "scheduled")
@@ -84,7 +530,7 @@ fn visible_in_filter(status: &str, filter: i32) -> bool {
 }
 fn status_label(status: &str) -> &'static str {
     match status {
-        "downloading" => "DOWNLOADING", "queued" => "QUEUED", "paused" => "PAUSED",
+        "downloading" => "DOWNLOADING", "waiting" => "WAITING FOR FILE", "queued" => "QUEUED", "paused" => "PAUSED",
         "completed" => "Complete", "assembling" | "merging" => "COMBINING FILE",
         "verifying" => "VERIFYING", "error" | "failed" => "NEEDS ATTENTION",
         "scheduled" => "SCHEDULED", "preparing" | "probing" => "CONNECTING", _ => "READY",
@@ -181,7 +627,7 @@ fn build_item(task: &TaskView, checked: bool, file_available: bool) -> DownloadI
     DownloadItem {
         id: task.id.clone().into(), name: task.filename.clone().into(),
         subtitle: format!("{} · {}{}", host(&task.url), human(task.downloaded_bytes), if task.speed_bps > 0 { format!(" · {}/s", human(task.speed_bps)) } else { String::new() }).into(),
-        status: status_label(&task.status).into(), progress,
+        status: if task.status == "waiting" { "WAITING".into() } else { status_label(&task.status).into() }, progress,
         progress_text: task.total_bytes.map(|_| format!("{:.1}%", progress * 100.)).unwrap_or_else(|| "Size unknown".into()).into(),
         active: running(&task.status), can_pause: running(&task.status), can_resume: resumable_status(&task.status), completed: task.status == "completed", checked, file_available, failed: matches!(task.status.as_str(), "error" | "failed"),
         stage_visible, stage_indeterminate, stage_progress,
@@ -200,7 +646,7 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
     }
     state.checked.retain(|id| snapshot.downloads.iter().any(|t| t.id == *id && t.status == "completed"));
     ui.set_checked_count(state.checked.len() as i32);
-    ui.set_transfer_active(snapshot.downloads.iter().any(|t| matches!(t.status.as_str(), "downloading" | "preparing" | "probing" | "connecting" | "assembling" | "merging" | "verifying")));
+    ui.set_transfer_active(snapshot.downloads.iter().any(|t| matches!(t.status.as_str(), "waiting" | "downloading" | "preparing" | "probing" | "connecting" | "assembling" | "merging" | "verifying")));
     ui.set_selected_id(state.selected.clone().into());
     if state.last_speed_sample.map_or(true, |t| t.elapsed() >= Duration::from_secs(1)) {
         state.last_speed_sample = Some(Instant::now());
@@ -424,9 +870,7 @@ fn settings_from(ui: &QdmWindow, base: &Settings) -> Result<Settings, String> {
 }
 
 fn hwnd(ui: &QdmWindow) -> Option<HWND> {
-    let handle = ui.window().window_handle();
-    let raw = handle.window_handle().ok()?.as_raw();
-    match raw { RawWindowHandle::Win32(h) => Some(h.hwnd.get() as HWND), _ => None }
+    window_handle(&ui.window())
 }
 fn show(ui: &QdmWindow) {
     let _ = ui.show();
@@ -522,9 +966,22 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
     let ui = QdmWindow::new().map_err(|e| e.to_string())?;
     ui.invoke_use_dark_palette();
     let tray = QdmTray::new().map_err(|e| e.to_string())?;
+    let popup = CompletionPopup::new().map_err(|e| e.to_string())?;
+    let completions = Rc::new(RefCell::new(VecDeque::<Completion>::new()));
+    let popup_shown = Rc::new(Cell::new(true));
+    let slide = Rc::new(PopupSlide::new());
+    let morph = Rc::new(PopupMorph::new());
+    // Task currently represented by the compact transfer card.
+    let progress_id = Rc::new(RefCell::new(None::<String>));
+    // A transfer card the user closed; suppress it until the target changes.
+    let progress_dismissed = Rc::new(RefCell::new(None::<String>));
+    // When the visible completion card should retract on its own.
+    let completion_until = Rc::new(Cell::new(None::<Instant>));
     let preferences = data.join("ui-settings.json");
     let appearance: Appearance = std::fs::read(&preferences).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     ui.set_reduced_motion(appearance.reduced_motion);
+    slide.reduced_motion.set(appearance.reduced_motion);
+    morph.reduced_motion.set(appearance.reduced_motion);
     ui.set_version_label(format!("v{}", env!("CARGO_PKG_VERSION")).into());
     let jobs = Rc::new(VecModel::<DownloadItem>::default());
     let lanes = Rc::new(VecModel::<LaneItem>::default());
@@ -534,13 +991,88 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
         toast_until: None, preferences, clipboard: ClipboardWatcher::new(), clipboard_seq: 0,
         order_key: 0, row_sig: Vec::new(), row_avail: Vec::new(),
     }));
+    { let weak = popup.as_weak(); let queue = completions.clone(); let shown = popup_shown.clone(); let slide = slide.clone(); let morph = morph.clone(); let progress_id = progress_id.clone(); let dismissed = progress_dismissed.clone(); let until = completion_until.clone(); let state = state.clone();
+      popup.on_dismiss(move || if let Some(popup) = weak.upgrade() {
+          dismiss_notification(&popup, &queue, &shown, &slide, &morph, &progress_id, &dismissed, &until, &state.borrow().snapshot);
+      }); }
+    { let weak = popup.as_weak(); let queue = completions.clone(); let shown = popup_shown.clone(); let slide = slide.clone(); let morph = morph.clone(); let progress_id = progress_id.clone(); let dismissed = progress_dismissed.clone(); let until = completion_until.clone(); let state = state.clone();
+      popup.window().on_close_requested(move || {
+          if let Some(popup) = weak.upgrade() {
+              if queue.borrow().is_empty() {
+                  // Closing the compact transfer card keeps it closed for this task.
+                  *dismissed.borrow_mut() = progress_id.borrow().clone();
+                  let _ = popup.hide();
+              } else {
+                  dismiss_notification(&popup, &queue, &shown, &slide, &morph, &progress_id, &dismissed, &until, &state.borrow().snapshot);
+              }
+          }
+          slint::CloseRequestResponse::KeepWindowShown
+      }); }
+    { let weak = ui.as_weak(); let popup_weak = popup.as_weak(); let state = state.clone(); let progress_id = progress_id.clone(); let dismissed = progress_dismissed.clone();
+      popup.on_view_details(move || {
+          let id = progress_id.borrow().clone();
+          if let Some(id) = id {
+              { let mut view = state.borrow_mut(); view.selected = id.clone(); view.filter = 0; }
+              *dismissed.borrow_mut() = Some(id.clone());
+              if let Some(ui) = weak.upgrade() {
+                  ui.set_filter_index(0);
+                  ui.set_selected_id(id.into());
+                  show(&ui);
+              }
+          }
+          if let Some(popup) = popup_weak.upgrade() { let _ = popup.hide(); }
+      }); }
+    { let popup_weak = popup.as_weak(); let progress_id = progress_id.clone(); let dismissed = progress_dismissed.clone();
+      popup.on_close_progress(move || {
+          *dismissed.borrow_mut() = progress_id.borrow().clone();
+          if let Some(popup) = popup_weak.upgrade() { let _ = popup.hide(); }
+      }); }
+    macro_rules! completion_action {
+        ($callback:ident, $variant:ident, $folder:expr) => {{
+            let weak = popup.as_weak(); let queue = completions.clone(); let tx = command_tx.clone();
+            let shown = popup_shown.clone(); let slide = slide.clone(); let morph = morph.clone();
+            let progress_id = progress_id.clone(); let dismissed = progress_dismissed.clone();
+            let until = completion_until.clone(); let state = state.clone();
+            popup.$callback(move || if let Some(popup) = weak.upgrade() {
+                let item = queue.borrow().front().cloned();
+                if let Some(item) = item {
+                    // RevealFile resolves a missing file path using the engine's task directory.
+                    let exists = $folder || item.file_path.as_deref().is_some_and(|path| Path::new(path).is_file());
+                    if !exists {
+                        popup.set_completion_path("File or folder is unavailable. Dismiss to continue.".into());
+                    } else if tx.send(Command::$variant(item.id)).is_err() {
+                        popup.set_completion_path("Download engine unavailable. Please try again.".into());
+                    } else {
+                        // Opening the file or folder consumes this completion.
+                        dismiss_notification(&popup, &queue, &shown, &slide, &morph, &progress_id, &dismissed, &until, &state.borrow().snapshot);
+                    }
+                }
+            });
+        }};
+    }
+    completion_action!(on_open_file, OpenFile, false);
+    completion_action!(on_open_folder, RevealFile, true);
     let mailbox = Arc::new(Mutex::new(Mailbox::default()));
     let sink = mailbox.clone();
     std::thread::Builder::new().name("qdm-ui-mailbox".into()).spawn(move || {
         while let Ok(event) = event_rx.recv() {
             let mut queue = sink.lock().unwrap_or_else(|e| e.into_inner());
             match event {
-                UiEvent::State(snapshot) => queue.latest = Some(snapshot),
+                UiEvent::State(snapshot) => {
+                    let newly_completed = completed_transitions(
+                        &queue.last_statuses,
+                        &snapshot.downloads,
+                        !queue.has_snapshot,
+                    );
+                    queue.pending_completions.extend(newly_completed);
+                    queue.last_statuses = snapshot
+                        .downloads
+                        .iter()
+                        .map(|task| (task.id.clone(), task.status.clone()))
+                        .collect();
+                    queue.has_snapshot = true;
+                    queue.latest = Some(snapshot);
+                }
                 event => { if queue.events.len() == 32 { queue.events.remove(0); } queue.events.push(event); }
             }
         }
@@ -745,14 +1277,19 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
            ui.set_setting_directory(settings.download_dir.into());
           ui.set_setting_tray(settings.close_to_tray); ui.set_setting_clipboard(settings.clipboard_suggestions); ui.set_settings_open(true);
       }); }
-    { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
+    { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone(); let slide = slide.clone(); let morph = morph.clone();
       ui.on_save_settings(move || if let Some(ui) = weak.upgrade() {
           let base = state.borrow().snapshot.settings.clone();
           match settings_from(&ui, &base) {
               Ok(settings) => {
                   let preferences = state.borrow().preferences.clone();
-                  let bytes = serde_json::to_vec_pretty(&Appearance { reduced_motion: ui.get_reduced_motion() }).unwrap_or_default();
+                  let reduced_motion = ui.get_reduced_motion();
+                  let bytes = serde_json::to_vec_pretty(&Appearance { reduced_motion }).unwrap_or_default();
                   if let Err(e) = std::fs::write(&preferences, bytes) { toast(&ui, &state, format!("Could not save appearance settings: {e}"), true); return; }
+                  // Notification windows animate independently of the main UI, so
+                  // apply the preference immediately instead of on the next launch.
+                  slide.reduced_motion.set(reduced_motion);
+                  morph.reduced_motion.set(reduced_motion);
                   if send(&tx, Command::UpdateSettings(settings), &ui, &state) { ui.set_settings_open(false); toast(&ui, &state, "Settings saved.", false); }
               }
               Err(error) => toast(&ui, &state, error, true),
@@ -799,38 +1336,116 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
       }); }
 
     let timer = Timer::default();
-    { let weak = ui.as_weak(); let tray_weak = tray.as_weak(); let state = state.clone(); let jobs = jobs.clone(); let lanes = lanes.clone();
+    { let weak = ui.as_weak(); let tray_weak = tray.as_weak(); let popup_weak = popup.as_weak(); let completions = completions.clone(); let popup_shown = popup_shown.clone(); let slide = slide.clone(); let morph = morph.clone(); let progress_id = progress_id.clone(); let progress_dismissed = progress_dismissed.clone(); let completion_until = completion_until.clone(); let state = state.clone(); let jobs = jobs.clone(); let lanes = lanes.clone();
       let tagged = Cell::new(false);
+      // A failed popup presentation is retried after a delay, not every tick.
+      let popup_retry_after = Cell::new(None::<Instant>);
       timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
           let Some(ui) = weak.upgrade() else { return; };
           if !tagged.get() { tagged.set(native_setup(&ui)); }
-          let (latest, events, disconnected) = {
+          let (latest, events, disconnected, newly_completed) = {
               let mut queue = mailbox.lock().unwrap_or_else(|e| e.into_inner());
-              (queue.latest.take(), std::mem::take(&mut queue.events), queue.disconnected)
+              (
+                  queue.latest.take(),
+                  std::mem::take(&mut queue.events),
+                  queue.disconnected,
+                  std::mem::take(&mut queue.pending_completions),
+              )
           };
-           if let Some(snapshot) = latest {
-               let mut view = state.borrow_mut();
-               let newest_added = newest_unseen_id(view.known_ids.as_ref(), &snapshot.downloads);
-               view.known_ids = Some(snapshot.downloads.iter().map(|task| task.id.clone()).collect());
-               view.snapshot = snapshot;
-               if let Some(ref id) = newest_added {
-                   // A new task from QDM, browser capture, or plugin becomes the selected
-                   // first row. Switch back to All if a filter would hide the new item.
-                   view.selected = id.clone();
-                   view.filter = 0;
-                   ui.set_filter_index(0);
-               }
-               render(&ui, &mut view, &jobs, &lanes);
-               drop(view);
-               if newest_added.is_some() {
-                   // ListView preserves scrolling during model diffs; reset only on arrival.
-                   ui.invoke_scroll_downloads_to_top();
-               }
-               if let Some(tray) = tray_weak.upgrade() { tray.set_status(format!("QDM · {} active · {}", ui.get_active_label(), ui.get_aggregate_speed()).into()); }
-           }
+          if let Some(snapshot) = latest {
+              let mut view = state.borrow_mut();
+              let newest_added = newest_unseen_id(view.known_ids.as_ref(), &snapshot.downloads);
+              view.known_ids = Some(snapshot.downloads.iter().map(|task| task.id.clone()).collect());
+              view.snapshot = snapshot;
+              if let Some(ref id) = newest_added {
+                  // A new task from QDM, browser capture, or plugin becomes the selected
+                  // first row. Switch back to All if a filter would hide the new item.
+                  view.selected = id.clone();
+                  view.filter = 0;
+                  ui.set_filter_index(0);
+              }
+              render(&ui, &mut view, &jobs, &lanes);
+              drop(view);
+              if !newly_completed.is_empty() {
+                  let mut queue = completions.borrow_mut();
+                  queue.extend(newly_completed);
+                  if let Some(popup) = popup_weak.upgrade() {
+                      // The popup might currently be the compact transfer card:
+                      // then this call morphs it in place instead of re-entering.
+                      let presented = present_completion(&popup, &queue, &slide, &morph);
+                      popup_shown.set(presented);
+                      if presented { completion_until.set(Some(Instant::now() + COMPLETION_LINGER)); }
+                      popup_retry_after.set(if presented { None } else { Some(Instant::now() + Duration::from_secs(5)) });
+                  }
+              }
+              if newest_added.is_some() {
+                  // ListView preserves scrolling during model diffs; reset only on arrival.
+                  ui.invoke_scroll_downloads_to_top();
+              }
+              if let Some(tray) = tray_weak.upgrade() { tray.set_status(format!("QDM · {} active · {}", ui.get_active_label(), ui.get_aggregate_speed()).into()); }
+          }
+          // A completion card retracts on its own after ten seconds without action.
+          if !completions.borrow().is_empty()
+              && completion_until.get().is_some_and(|until| Instant::now() >= until)
+          {
+              if let Some(popup) = popup_weak.upgrade() {
+                  dismiss_notification(&popup, &completions, &popup_shown, &slide, &morph, &progress_id, &progress_dismissed, &completion_until, &state.borrow().snapshot);
+              }
+          }
+          // One window wears both states: the compact transfer card while a
+          // download runs, and the completion card after it finishes. A finish
+          // morphs the visible card instead of presenting a new notification.
+          if !completions.borrow().is_empty() {
+              let retry_ready = popup_retry_after.get().is_none_or(|deadline| Instant::now() >= deadline);
+              if !popup_shown.get() && retry_ready {
+                  if let Some(popup) = popup_weak.upgrade() {
+                      let presented = present_completion(&popup, &completions.borrow(), &slide, &morph);
+                      popup_shown.set(presented);
+                      if presented { completion_until.set(Some(Instant::now() + COMPLETION_LINGER)); }
+                      popup_retry_after.set(if presented { None } else { Some(Instant::now() + Duration::from_secs(5)) });
+                  }
+              }
+          } else {
+              let current = progress_id.borrow().clone();
+              let active = { let view = state.borrow(); progress_task(&view.snapshot, current.as_deref()) };
+              if let Some(task) = active {
+                  if let Some(popup) = popup_weak.upgrade() {
+                      *progress_id.borrow_mut() = Some(task.id.clone());
+                      if progress_dismissed.borrow().as_deref() == Some(task.id.as_str()) {
+                          // The user closed this transfer card; keep it closed until
+                          // the target changes or its completion arrives.
+                          if popup.window().is_visible() { let _ = popup.hide(); }
+                      } else {
+                          *progress_dismissed.borrow_mut() = None;
+                          if popup.window().is_visible() {
+                              // Live update only: keep the card where it is and let the
+                              // gold bar animate to the new progress value.
+                              fill_progress(&popup, &task);
+                          } else if popup_retry_after.get().is_none_or(|deadline| Instant::now() >= deadline) {
+                              let presented = present_progress(&popup, &task, &slide);
+                              popup_shown.set(presented);
+                              popup_retry_after.set(if presented { None } else { Some(Instant::now() + Duration::from_secs(5)) });
+                          }
+                      }
+                  }
+              } else if progress_id.borrow().is_some() {
+                  // Cancelled or paused: nothing left to report, so retract the card.
+                  *progress_id.borrow_mut() = None;
+                  *progress_dismissed.borrow_mut() = None;
+                  popup_retry_after.set(None);
+                  if let Some(popup) = popup_weak.upgrade() { let _ = popup.hide(); }
+              }
+          }
           for event in events {
               match event {
-                  UiEvent::Error(error) => toast(&ui, &state, error, true),
+                  UiEvent::Error(error) => {
+                      if !completions.borrow().is_empty() {
+                          if let Some(popup) = popup_weak.upgrade() {
+                              popup.set_completion_path(format!("QDM reported an error (possibly unrelated): {error}").into());
+                          }
+                      }
+                      toast(&ui, &state, error, true);
+                  },
                   UiEvent::Notice(message) => toast(&ui, &state, message, false),
                   UiEvent::Integration { port, token, extension_path } => {
                       ui.set_bridge_port(port.to_string().into()); ui.set_bridge_token(token.into());
@@ -866,6 +1481,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
     tray.show().map_err(|e| e.to_string())?;
     ui.show().map_err(|e| e.to_string())?;
     native_setup(&ui);
+    slide.anchor.set(hwnd(&ui));
     let result = slint::run_event_loop_until_quit().map_err(|e| e.to_string());
     timer.stop();
     drop(tray);
@@ -876,6 +1492,91 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_notifications_only_report_new_successful_transitions() {
+        let task = |id: &str, filename: &str, status: &str| TaskView {
+            id: id.into(),
+            filename: filename.into(),
+            status: status.into(),
+            file_path: Some(format!(r"C:\downloads\{filename}")),
+            ..TaskView::default()
+        };
+        let history = task("history", "old.zip", "completed");
+        assert!(completed_transitions(
+            &HashMap::new(),
+            std::slice::from_ref(&history),
+            true,
+        )
+        .is_empty());
+
+        let previous = HashMap::from([
+            ("already-done".into(), "completed".into()),
+            ("finished".into(), "downloading".into()),
+            ("failed".into(), "error".into()),
+        ]);
+        let current = vec![
+            task("already-done", "old-again.zip", "completed"),
+            task("finished", "new.zip", "completed"),
+            task("failed", "broken.zip", "error"),
+            task("new", "fresh.zip", "completed"),
+        ];
+        assert_eq!(
+            completed_transitions(&previous, &current, false),
+            vec![
+                Completion { id: "finished".into(), filename: "new.zip".into(), file_path: Some(r"C:\downloads\new.zip".into()) },
+                Completion { id: "new".into(), filename: "fresh.zip".into(), file_path: Some(r"C:\downloads\fresh.zip".into()) },
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_card_stays_on_the_running_transfer() {
+        let task = |id: &str, status: &str, created_at: u64| TaskView {
+            id: id.into(),
+            status: status.into(),
+            created_at,
+            ..TaskView::default()
+        };
+        let snapshot = Snapshot {
+            downloads: vec![
+                task("done", "completed", 900),
+                task("queued", "queued", 800),
+                task("newest", "downloading", 700),
+                task("older", "downloading", 100),
+            ],
+            ..Snapshot::default()
+        };
+        // The card keeps its current transfer instead of jumping to newer work.
+        assert_eq!(progress_task(&snapshot, Some("older")).unwrap().id, "older");
+        // A finished target hands the card to running work, preferring downloads over queues.
+        assert_eq!(progress_task(&snapshot, Some("done")).unwrap().id, "newest");
+        assert_eq!(progress_task(&snapshot, None).unwrap().id, "newest");
+        let idle = Snapshot { downloads: vec![task("done", "completed", 900)], ..Snapshot::default() };
+        assert!(progress_task(&idle, Some("older")).is_none());
+    }
+
+    #[test]
+    fn compact_transfer_card_is_shorter_than_the_completion_card() {
+        assert_eq!(popup_logical_height(0.0), POPUP_COMPACT_HEIGHT as f32);
+        assert_eq!(popup_logical_height(1.0), POPUP_FULL_HEIGHT as f32);
+        // Clamped, so an interrupted morph can never resize the window off-bounds.
+        assert_eq!(popup_logical_height(-1.0), POPUP_COMPACT_HEIGHT as f32);
+        assert_eq!(popup_logical_height(2.0), POPUP_FULL_HEIGHT as f32);
+    }
+
+    #[test]
+    fn transfer_size_label_describes_probe_states() {
+        let pending = TaskView { downloaded_bytes: 0, total_bytes: None, ..TaskView::default() };
+        assert_eq!(transfer_size_label(&pending), "Preparing download");
+        let unknown = TaskView { downloaded_bytes: 3 * 1024 * 1024, total_bytes: None, ..TaskView::default() };
+        assert_eq!(transfer_size_label(&unknown), "3.0 MiB");
+        let known = TaskView { downloaded_bytes: 512, total_bytes: Some(1024), ..TaskView::default() };
+        assert_eq!(transfer_size_label(&known), "512 B of 1.0 KiB");
+        let waiting = TaskView { status: "waiting".into(), ..known.clone() };
+        assert_eq!(transfer_size_label(&waiting), "Waiting for the file…");
+        assert_eq!(status_label("waiting"), "WAITING FOR FILE");
+    }
 
     #[test]
     fn queue_configs_parse_priority_and_category_and_reject_bad_input() {
@@ -953,7 +1654,7 @@ mod tests {
             assert!(resumable_status(status), "{status} must show Resume");
             assert!(!running(status), "{status} must not show Pause");
         }
-        for status in ["queued", "downloading", "preparing", "probing", "assembling", "verifying"] {
+        for status in ["queued", "waiting", "downloading", "preparing", "probing", "assembling", "verifying"] {
             assert!(visible_in_filter(status, 1), "{status} hidden from Active");
             assert!(running(status), "{status} must show Pause");
             assert!(!resumable_status(status), "{status} must not show Resume");

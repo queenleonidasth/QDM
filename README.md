@@ -4,7 +4,7 @@ QDM is a native Windows x64 download manager built with Rust and Slint. Its HTTP
 
 ## Status
 
-The current source is version 0.4.0. The [six-feature implementation plan](docs/QDM-PRISM-SIX-FEATURE-IMPLEMENTATION-PLAN-2026-11-01.md) remains in progress; it is not a claim that all planned features are complete. A release requires the tests in that plan to pass against the same build artifact.
+The current source is version 0.4.1. The [six-feature implementation plan](docs/QDM-PRISM-SIX-FEATURE-IMPLEMENTATION-PLAN-2026-11-01.md) remains in progress; it is not a claim that all planned features are complete. A release requires the tests in that plan to pass against the same build artifact.
 
 ## Getting started
 
@@ -46,7 +46,9 @@ Automatic capture waits for QDM to accept the download before cancelling the bro
 
 The Chromium extension includes opt-in capture source code, but native-host registration for a specific extension ID and real-browser acceptance testing remain outstanding. Firefox/Zen evidence does not establish Chromium compatibility.
 
-The extensions do not automatically forward website cookies or authorization headers. Authenticated and temporary links may therefore fail. Explicit session headers accepted by the local bridge are kept in memory rather than saved in download history. QDM does not bypass authentication or DRM.
+The extensions do not automatically forward website cookies or authorization headers unless **session forwarding** is enabled (default on, toggle in the extension options). When enabled, the extension sends the captured URL's cookies, the referring page and the browser user agent to QDM over the authenticated loopback bridge. QDM applies them only to that download, keeps them in memory, never writes them to download history, and strips cookies and authorization headers on cross-host redirects. Turn the toggle off to keep protected sessions entirely in the browser.
+
+A capture waits briefly for the browser's redirect chain and hands QDM the **final URL**, not the page that started the download. This matters for sites whose visible link redirects to a separate file host. The browser's own copy is cancelled only after QDM reports real download progress; if QDM cannot start (a bot challenge, an expired link, or an origin error), the browser keeps its download instead of losing both copies. QDM does not solve interactive bot challenges (for example Cloudflare's JavaScript check) or bypass authentication or DRM.
 
 ## Data and privacy
 
@@ -56,6 +58,8 @@ The extensions do not automatically forward website cookies or authorization hea
 | Download history and checkpoints | `%APPDATA%\QDM\state-v3.sqlite3` |
 | UI appearance settings | `%APPDATA%\QDM\ui-settings.json` |
 | Partial download | `.qdm-<task-id>.partial` in the download folder |
+
+Browser session headers forwarded by the extension (cookies, referer, user agent) are kept in memory for the life of the download and are never written to the database.
 
 Keep a backup of the database and program before replacing an installed build. Do not modify a live SQLite database while QDM is running.
 
@@ -68,6 +72,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1
 cargo test --locked --all-targets
 node tests\acceptance.cjs --binary target\release\QDM.exe
 node tests\bridge-native.cjs --binary target\release\QDM.exe
+node tests\browser-session.cjs
+node tests\browser-capture.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\slint-ui-acceptance.ps1 -Binary target\release\QDM.exe -OutputDirectory "$env:TEMP\qdm-ui-evidence"
 ```
 

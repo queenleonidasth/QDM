@@ -2,12 +2,43 @@
 const api = globalThis.browser || chrome;
 const action = api.action || api.browserAction;
 const inflight = new Set();
-const defaults = { token: '', port: 17876, autoCapture: true };
+const defaults = { token: '', port: 17876, autoCapture: true, forwardSession: true };
 const nativeHost = 'com.queen.qdm';
 let pendingConnection = null;
 
 async function settings() {
   return api.storage.local.get(defaults);
+}
+async function sessionHeaders(config, url, referer) {
+  if (!config || config.forwardSession === false) return {};
+  try { return await QDMSession.browserSession(url, referer); } catch (_) { return {}; }
+}
+function withSession(payload, headers) {
+  return Object.keys(headers).length ? { ...payload, headers } : payload;
+}
+// A download's url is usually the page request that started it, while a
+// redirect (including a Cloudflare verification hand-off) means the real file
+// lives at finalUrl. Wait for the redirect chain, then prefer the final URL and
+// the final host's cookies. HTML pages are not files, so leave them to the
+// browser instead of handing a challenge page to QDM.
+async function resolvedDownload(item) {
+  await new Promise(resolve => setTimeout(resolve, 400));
+  let current = item;
+  try {
+    const [found] = await api.downloads.search({ id: item.id });
+    if (found) current = found;
+  } catch (_) { /* fall back to the event payload */ }
+  if (current.state === 'interrupted' || current.state === 'complete' || current.error) return null;
+  const url = current.finalUrl || item.finalUrl || item.url;
+  const mime = String(current.mime || item.mime || '').toLowerCase();
+  let isHtmlPath = false;
+  try { isHtmlPath = /\.(?:html?|xhtml)$/i.test(new URL(url).pathname); } catch (_) {}
+  if (mime.startsWith('text/html') && !isHtmlPath) return null;
+  return {
+    url,
+    referrer: item.referrer || current.referrer || '',
+    filename: current.filename || item.filename
+  };
 }
 function valid(config) {
   return /^[a-f0-9]{64}$/i.test(config?.token || '') &&
@@ -77,6 +108,28 @@ async function feedback(message, error = false) {
   await action.setBadgeText({ text: error ? '!' : '✓' });
   await action.setBadgeBackgroundColor({ color: error ? '#a84b3d' : '#347f60' });
 }
+// The browser's copy is only cancelled after QDM proves it is receiving bytes.
+// A Cloudflare challenge or an expired one-time link then leaves the browser's
+// working download alone instead of losing both copies.
+async function qdmStarted(paired, id, timeout = 15000) {
+  if (!id) return false;
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    try {
+      const response = await fetch('http://127.0.0.1:' + paired.port + '/task-status?id=' + encodeURIComponent(id), {
+        headers: { Authorization: 'Bearer ' + paired.token },
+        signal: AbortSignal.timeout(2500)
+      });
+      if (!response.ok) return false;
+      const task = await response.json();
+      if (task.status === 'completed') return true;
+      if (task.status === 'downloading' && Number(task.downloadedBytes) > 0) return true;
+      if (task.status === 'error' || task.status === 'failed') return false;
+    } catch (_) { return false; }
+  }
+  return false;
+}
 async function sendDownload(payload, paired) {
   const response = await fetch('http://127.0.0.1:' + paired.port + '/downloads', {
     method: 'POST',
@@ -119,8 +172,11 @@ async function autoCapture(item) {
     if (!config.autoCapture) return;
     // Do not pause the browser request before ownership is acknowledged:
     // a pre-body pause can make Firefox downloads impossible to resume.
-    const file = basename(item.filename);
-    const payload = { url: item.url, ...(file ? { filename: file } : {}) };
+    const target = await resolvedDownload(item);
+    if (!target) return;
+    const file = basename(target.filename);
+    const headers = await sessionHeaders(config, target.url, target.referrer);
+    const payload = withSession({ url: target.url, ...(file ? { filename: file } : {}) }, headers);
     let accepted;
     try {
       accepted = await handoff(payload);
@@ -128,10 +184,21 @@ async function autoCapture(item) {
       await feedback('QDM ไม่พร้อม — ให้ Zen ดาวน์โหลดตามปกติ: ' + error.message, true);
       return;
     }
+    const paired = await resolveConnection();
+    if (!(await qdmStarted(paired, accepted.ids && accepted.ids[0]))) {
+      await feedback('QDM เริ่มดาวน์โหลดไม่ได้ — ให้ Zen ดาวน์โหลดต่อ', true);
+      return;
+    }
+    let current = null;
+    try { [current] = await api.downloads.search({ id: item.id }); } catch (_) { /* optional */ }
+    if (current && current.state === 'complete') {
+      await feedback('Zen โหลดเสร็จแล้ว — QDM มีสำเนาแยก');
+      return;
+    }
     try {
       await api.downloads.cancel(item.id);
       try { await api.downloads.erase({ id: item.id }); } catch (_) { /* optional history cleanup */ }
-      await feedback('รับไฟล์เข้า QDM แล้ว (' + accepted.accepted + ' รายการ)');
+      await feedback('ย้ายการดาวน์โหลดเข้า QDM แล้ว (' + accepted.accepted + ' รายการ)');
     } catch (_) {
       await feedback('QDM รับงานแล้ว แต่ Zen ยกเลิกงานเดิมไม่สำเร็จ (อาจมีไฟล์ซ้ำ)', true);
     }
@@ -157,7 +224,9 @@ api.contextMenus.onClicked.addListener(async info => {
   try {
     const url = info.linkUrl || info.srcUrl;
     if (!/^https?:\/\//i.test(url || '')) throw new Error('ลิงก์นี้ไม่ใช่ HTTP(S) โดยตรง');
-    await handoff({ urls: [url] }, null, true);
+    const config = await settings();
+    const headers = await sessionHeaders(config, url, info.pageUrl || info.frameUrl || '');
+    await handoff(withSession({ urls: [url] }, headers), null, true);
     await feedback('ส่งลิงก์เข้า QDM แล้ว');
   } catch (error) { await feedback(error.message, true); }
 });
@@ -169,8 +238,24 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.action !== 'qdm-send') return false;
-  handoff({ urls: message.urls }, null, true)
-    .then(result => sendResponse({ ok: true, ...result }),
+  (async () => {
+    const urls = Array.isArray(message.urls) ? message.urls : [];
+    const config = await settings();
+    let headers = {};
+    // A single URL may use the referring tab's session. A batch can mix hosts,
+    // so forwarding one cookie jar to every URL would leak it across sites.
+    if (urls.length === 1) {
+      let referer = typeof message.referrer === 'string' ? message.referrer : '';
+      if (!referer) {
+        try {
+          const [tab] = await api.tabs.query({ active: true, currentWindow: true });
+          referer = tab?.url || '';
+        } catch (_) { /* tab context is optional */ }
+      }
+      headers = await sessionHeaders(config, urls[0], referer);
+    }
+    return handoff(withSession({ urls }, headers), null, true);
+  })().then(result => sendResponse({ ok: true, ...result }),
           error => sendResponse({ ok: false, error: error.message }));
   return true;
 });

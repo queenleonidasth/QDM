@@ -1,18 +1,20 @@
 {
   "name": "QDM — QUEEN Download Manager",
-  "version": "0.3.1",
-  "description": "ดักดาวน์โหลดไฟล์ HTTP(S) จาก Zen อัตโนมัติ แล้วส่งเข้า QDM (หรือใช้ Zen ต่อเมื่อ QDM ไม่พร้อม)",
+  "version": "0.4.1",
+  "description": "ดักดาวน์โหลดไฟล์ HTTP(S) จาก Zen อัตโนมัติ แล้วส่งเข้า QDM พร้อม session ของเบราว์เซอร์ (หรือใช้ Zen ต่อเมื่อ QDM ไม่พร้อม)",
   "permissions": [
     "downloads",
     "contextMenus",
     "storage",
     "nativeMessaging",
+    "cookies",
+    "<all_urls>",
     "http://127.0.0.1/*"
   ],
   "icons": { "48": "icon.png", "128": "icon.png" },
   "options_ui": { "page": "options.html", "open_in_tab": true },
   "manifest_version": 2,
-  "background": { "scripts": ["background.js"], "persistent": true },
+  "background": { "scripts": ["session.js", "background.js"], "persistent": true },
   "browser_action": {
     "default_popup": "popup.html",
     "default_title": "QDM — Auto Download"

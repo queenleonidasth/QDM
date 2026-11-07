@@ -90,26 +90,35 @@ fn run() -> Result<(), String> {
                 None
             }
         };
-        let _ = events_tx.send(UiEvent::State(engine.snapshot()));
+        // Subscribe before the baseline snapshot so transitions during startup cannot be lost.
+        let mut updates = engine.subscribe();
+        let initial_snapshot = engine.snapshot();
+        let initial_revision = initial_snapshot.revision;
+        let _ = events_tx.send(UiEvent::State(initial_snapshot));
         let initial_warning = engine.warning();
         if let Some(warning) = initial_warning.as_ref() {
             let _ = events_tx.send(UiEvent::Notice(warning.clone()));
         }
-        let mut updates = engine.subscribe();
         let relay_tx = events_tx.clone();
         let relay_engine = engine.clone();
         runtime.spawn(async move {
             let mut previous_warning = initial_warning;
+            let mut last_revision = initial_revision;
             loop {
                 match updates.recv().await {
                     Ok(s) => {
+                        if s.revision <= last_revision { continue; }
+                        last_revision = s.revision;
                         if relay_tx.send(UiEvent::State(s)).is_err() {
                             break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let snapshot = relay_engine.snapshot();
+                        if snapshot.revision <= last_revision { continue; }
+                        last_revision = snapshot.revision;
                         if relay_tx
-                            .send(UiEvent::State(relay_engine.snapshot()))
+                            .send(UiEvent::State(snapshot))
                             .is_err()
                         {
                             break;
