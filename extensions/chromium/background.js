@@ -14,30 +14,17 @@ async function sessionHeaders(config, url, referer) {
 function withSession(payload, headers) {
   return Object.keys(headers).length ? { ...payload, headers } : payload;
 }
-// A download's item.url is usually the page request that started it, while a
-// redirect (including a Cloudflare verification hand-off) means the real file
-// lives at finalUrl. Wait a moment for the redirect chain, then prefer the
-// final URL and the final host's cookies. HTML pages are not files, so leave
-// them to the browser instead of handing a challenge page to QDM.
-async function resolvedDownload(item) {
-  await new Promise(resolve => setTimeout(resolve, 400));
-  let current = item;
-  try {
-    const [found] = await api.downloads.search({ id: item.id });
-    if (found) current = found;
-  } catch (_) { /* fall back to the event payload */ }
-  if (current.state === 'interrupted' || current.error) return null;
-  if (current.state === 'complete') return null;
-  const url = current.finalUrl || item.finalUrl || item.url;
-  const mime = String(current.mime || item.mime || '').toLowerCase();
-  let isHtmlPath = false;
-  try { isHtmlPath = /\.(?:html?|xhtml)$/i.test(new URL(url).pathname); } catch (_) {}
-  if (mime.startsWith('text/html') && !isHtmlPath) return null;
-  return {
-    url,
-    referrer: item.referrer || current.referrer || '',
-    filename: current.filename || item.filename
-  };
+// onDeterminingFilename receives the final URL after redirects and blocks
+// browser completion until suggest() is called. Do not use the old 400ms wait:
+// for small downloads that delay exhausted the entire download lifetime.
+function resolvedDownload(item) {
+  const url = item.finalUrl || item.url;
+  const mime = String(item.mime || '').toLowerCase();
+  let parsed;
+  try { parsed = new URL(url); } catch (_) { return null; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  if (mime.startsWith('text/html')) return null;
+  return {url, referrer: item.referrer || '', filename: item.filename || ''};
 }
 async function requestHealth(cfg) {
   if (!valid(cfg)) return false;
@@ -122,38 +109,74 @@ async function qdmStarted(paired, id, timeout=15000){
   }
   return false;
 }
-async function capture(item) {
-  if(!eligible(item)||inflight.has(item.id))return;
+// The filename determination hook is a completion barrier: even 100KB files
+// cannot be finalized by Dia while ownership is negotiated with QDM.
+async function captureAtFilename(item) {
+  if (!eligible(item) || inflight.has(item.id)) return false;
   inflight.add(item.id);
+  let pausedByQdm = false;
+  let captured = false;
   try {
-    const config=await settings();
-    if(!config.autoCapture)return;
-    // Cancel the browser only after QDM explicitly acknowledges the request.
-    // A failed, paused, or protected handoff leaves Chrome's download alone.
-    const target=await resolvedDownload(item);
-    if(!target)return;
-    const filename=basename(target.filename);
-    const headers=await sessionHeaders(config,target.url,target.referrer);
-    const accepted=await handoff(withSession({url:target.url,...(filename?{filename}:{})},headers));
-    const paired=await resolveConnection();
-    if(!(await qdmStarted(paired,accepted.ids&&accepted.ids[0]))){
-      await feedback('QDM could not start this download; Chrome keeps it.',true);
-      return;
+    const config = await settings();
+    if (!config.autoCapture) return false;
+    const target = resolvedDownload(item);
+    if (!target) return false;
+    // Pausing avoids double network transfer for larger files. Some browsers
+    // cannot pause at this early stage; the filename barrier still prevents
+    // completion until the handoff decision has been made.
+    try { await api.downloads.pause(item.id); pausedByQdm = true; }
+    catch (_) { /* filename barrier still keeps this item unfinalized */ }
+    const filename = basename(target.filename);
+    const headers = await sessionHeaders(config, target.url, target.referrer);
+    const accepted = await handoff(withSession({url:target.url,...(filename?{filename}:{})},headers));
+    let started = false;
+    try {
+      const paired = await resolveConnection();
+      started = await qdmStarted(paired, accepted.ids && accepted.ids[0]);
+    } catch (_) { started = false; }
+    if (!started) {
+      await feedback('QDM has not confirmed receiving bytes; Dia will continue.', true);
+      return false;
     }
-    let current=null;
-    try{[current]=await api.downloads.search({id:item.id});}catch{}
-    if(current&&current.state==='complete'){
-      await feedback('Chrome already finished this file; QDM also has a copy.');
-      return;
+    // QDM has proved ownership. Cancel the browser item before releasing its
+    // filename determination callback to avoid a second completed file.
+    try { await api.downloads.cancel(item.id); }
+    catch (error) {
+      await feedback('QDM started, but Dia could not cancel its copy: '+String(error.message||error), true);
+      return false;
     }
-    await api.downloads.cancel(item.id);
-    try{await api.downloads.erase({id:item.id});}catch{}
-    await feedback('Download moved to QDM');
-  } catch(error) {
-    await feedback('Chrome kept the original download: '+String(error.message||error),true);
-  } finally {inflight.delete(item.id);}
+    pausedByQdm = false;
+    captured = true;
+    try { await api.downloads.erase({id:item.id}); } catch (_) {}
+    await feedback('Download transferred to QDM');
+    return true;
+  } catch (error) {
+    try { await feedback('Dia kept the download: '+String(error.message||error), true); } catch (_) {}
+    return false;
+  } finally {
+    if (!captured && pausedByQdm) {
+      try { await api.downloads.resume(item.id); } catch (_) {
+        try { await feedback('QDM fallback: resume the paused download in Dia.', true); } catch (_) {}
+      }
+    }
+    inflight.delete(item.id);
+  }
 }
-api.downloads.onCreated.addListener(item=>{void capture(item);});
+
+// Chrome/Chromium guarantee that a download cannot finish until all filename
+// listeners have invoked suggest(). Always invoke it exactly once, including
+// failure, cancellation and unexpected exceptions. Return true for async use.
+api.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  let called = false;
+  const release = () => {
+    if (called) return;
+    called = true;
+    try { suggest(); } catch (_) {}
+  };
+  if (!eligible(item)) { release(); return; }
+  void captureAtFilename(item).then(release,release);
+  return true;
+});
 api.runtime.onInstalled.addListener(async()=>{
   await api.contextMenus.removeAll();
   api.contextMenus.create({id:'qdm-download',title:'Download with QDM',contexts:['link','image','video','audio']});
