@@ -1714,7 +1714,10 @@ impl WinitWindowAdapter {
                 }
             }
 
-            winit_window.set_visible(true);
+            // QDM startup mode: do not map the window even for one frame.
+            if std::env::var_os("QDM_STARTUP_TRAY_ONLY").is_none() {
+                winit_window.set_visible(true);
+            }
 
             // X11 and Windows discard what is drawn into a window that isn't mapped,
             // which the buffer age a software surface reports doesn't account for.

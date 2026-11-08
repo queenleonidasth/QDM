@@ -158,7 +158,8 @@ fn run() -> Result<(), String> {
                 eprintln!("QDM shutdown: {e}");
             }
         });
-        let result = ui::slint_ui::run(commands_tx.clone(), events_rx, &data);
+        let start_hidden = args.iter().any(|a| a == "--startup-minimized" || a == "--silent");
+        let result = ui::slint_ui::run(commands_tx.clone(), events_rx, &data, start_hidden);
         let _ = commands_tx.send(Command::Quit);
         worker
             .join()
@@ -367,11 +368,10 @@ async fn dispatch(
             if t.status != "completed" {
                 return Err("The download has not completed.".into());
             }
-            platform::open(
-                t.file_path
-                    .as_deref()
-                    .ok_or("The downloaded file is unavailable")?,
-            )?;
+            let path = platform::existing_download_path(
+                t.file_path.as_deref(), &t.directory, &t.filename,
+            ).ok_or("The downloaded file is unavailable")?;
+            platform::open(&path.to_string_lossy())?;
         }
         Command::RevealFile(id) => {
             let t = engine
@@ -380,7 +380,12 @@ async fn dispatch(
                 .into_iter()
                 .find(|t| t.id == id)
                 .ok_or("Download not found")?;
-            platform::reveal(t.file_path.as_deref().unwrap_or(&t.directory))?;
+            let output = platform::existing_download_path(
+                t.file_path.as_deref(), &t.directory, &t.filename,
+            );
+            let path = output.as_deref().or_else(|| t.file_path.as_deref().map(std::path::Path::new))
+                .unwrap_or_else(|| std::path::Path::new(&t.directory));
+            platform::reveal(&path.to_string_lossy())?;
         }
         Command::OpenDownloadFolder => platform::open(&engine.snapshot().settings.download_dir)?,
         Command::ShowIntegration => {

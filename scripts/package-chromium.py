@@ -7,7 +7,7 @@ import zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
 source = root / "extensions" / "chromium"
 manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8-sig"))
-assert manifest["version"] == "0.4.1"
+assert manifest["version"] == "0.4.2"
 assert manifest["manifest_version"] == 3
 assert "cookies" in manifest["permissions"]
 assert "<all_urls>" in manifest["host_permissions"]

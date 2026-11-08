@@ -4,15 +4,15 @@ QDM is a native Windows x64 download manager built with Rust and Slint. Its HTTP
 
 ## Status
 
-The current source is version 0.4.1. The [six-feature implementation plan](docs/QDM-PRISM-SIX-FEATURE-IMPLEMENTATION-PLAN-2026-11-01.md) remains in progress; it is not a claim that all planned features are complete. A release requires the tests in that plan to pass against the same build artifact.
+The current source is version 0.4.2. The [six-feature implementation plan](docs/QDM-PRISM-SIX-FEATURE-IMPLEMENTATION-PLAN-2026-11-01.md) remains in progress; it is not a claim that all planned features are complete. A release requires the tests in that plan to pass against the same build artifact.
 
 ## Getting started
 
 1. Paste an HTTP or HTTPS link into **Download URL** and select **Download**.
 2. Use **All**, **Active**, and **Finished** to filter the download list.
-3. Select a download to inspect its progress, speed, and connection activity.
+3. Select a download to inspect its progress, speed, and connection activity. Every row, including failed and paused entries, has a checkbox for bulk removal.
 4. Use **Pause** and **Resume** for individual downloads, or **Pause all** and **Resume all** for all downloads.
-5. Open a completed file or reveal its location. To update an expired link, open **Details**, select **New URL**, and provide a replacement for the same file.
+5. Use **Show File** to reveal a completed download in File Explorer. To update an expired link, open **Details**, select **New URL**, and provide a replacement for the same file.
 6. **Remove from list only** keeps a completed file. The separate delete option removes the local file when it is safe to do so.
 
 Use **Add multiple downloads** in Preferences to enter one URL per line. You can choose a queue, set a per-download speed limit, and disable immediate start. For a single download, an optional expected SHA-256 verifies the whole file against a trusted independent source. A mismatch prevents publication of the final file.

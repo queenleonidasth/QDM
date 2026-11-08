@@ -63,6 +63,7 @@ struct ViewState {
     order_key: u64,
     row_sig: Vec<u64>,
     row_avail: Vec<bool>,
+    last_file_check: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,23 +394,51 @@ fn progress_task(snapshot: &Snapshot, current: Option<&str>) -> Option<TaskView>
         .cloned()
 }
 
+fn notification_stage(task: &TaskView) -> (bool, bool, f32, String) {
+    let assembling = matches!(task.status.as_str(), "assembling" | "merging" | "verifying");
+    if !assembling {
+        return (false, false, fraction(task.downloaded_bytes, task.total_bytes.unwrap_or(0)), String::new());
+    }
+    if task.assembly_total_bytes == 0 {
+        return (true, true, 0.0, "Verifying saved file...".into());
+    }
+    let progress = fraction(task.assembly_bytes, task.assembly_total_bytes);
+    let action = if task.status == "verifying" { "Verifying file" } else { "Merging file" };
+    (true, false, progress, format!("{action}  {:.1}%  -  {} / {}",
+        progress * 100.0, human(task.assembly_bytes), human(task.assembly_total_bytes)))
+}
+
 fn fill_progress(popup: &CompletionPopup, task: &TaskView) {
+    let (assembling, indeterminate, progress, label) = notification_stage(task);
     popup.set_transfer_name(task.filename.clone().into());
     popup.set_transfer_size(transfer_size_label(task).into());
-    popup.set_transfer_progress(fraction(task.downloaded_bytes, task.total_bytes.unwrap_or(0)));
+    popup.set_transfer_assembling(assembling);
+    popup.set_transfer_indeterminate(indeterminate);
+    popup.set_transfer_stage_label(label.into());
+    popup.set_transfer_progress(progress);
 }
 
 /// Paint the compact transfer card. When it is already on screen this only
 /// refreshes the name, size and progress bar; the entrance animation is never
 /// replayed for progress updates.
+fn set_notification_topmost(popup: &CompletionPopup) {
+    if let Some(handle) = window_handle(&popup.window()) {
+        unsafe {
+            SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+    }
+}
+
 fn present_progress(popup: &CompletionPopup, task: &TaskView, slide: &PopupSlide) -> bool {
     fill_progress(popup, task);
-    if popup.window().is_visible() { return true; }
+    if popup.window().is_visible() { set_notification_topmost(popup); return true; }
     popup.set_morph(0.0);
     set_popup_size(popup, 0.0);
     slide.prepare(popup);
     match popup.show() {
         Ok(()) => {
+            set_notification_topmost(popup);
             slide.start(popup);
             true
         }
@@ -446,6 +475,7 @@ fn present_completion(
         }
         // Only the card height and the content crossfade animate; the window
         // keeps its position and never re-enters.
+        set_notification_topmost(popup);
         morph.start(popup, 1.0);
         return true;
     }
@@ -454,6 +484,7 @@ fn present_completion(
     slide.prepare(popup);
     match popup.show() {
         Ok(()) => {
+            set_notification_topmost(popup);
             slide.start(popup);
             true
         }
@@ -527,6 +558,17 @@ fn visible_in_filter(status: &str, filter: i32) -> bool {
         2 => status == "completed",
         _ => true,
     }
+}
+// Bulk selection covers every row shown in the current view, including failed
+// and paused entries; restricting it to completed history left them stuck.
+fn visible_ids(downloads: &[TaskView], filter: i32) -> Vec<String> {
+    downloads.iter()
+        .filter(|task| visible_in_filter(&task.status, filter))
+        .map(|task| task.id.clone())
+        .collect()
+}
+fn retain_known_checked(checked: &mut HashSet<String>, downloads: &[TaskView]) {
+    checked.retain(|id| downloads.iter().any(|task| task.id == *id));
 }
 fn status_label(status: &str) -> &'static str {
     match status {
@@ -604,6 +646,12 @@ fn rate_sparkline(samples: Option<&VecDeque<u64>>) -> String {
 // A row's rendered presentation depends only on these fields. Building the
 // DownloadItem is relatively expensive (several String allocations), so we hash the
 // inputs and rebuild only rows whose signature actually moved on a telemetry tick.
+fn completed_file_exists(task: &TaskView) -> bool {
+    task.status == "completed" && crate::platform::existing_download_path(
+        task.file_path.as_deref(), &task.directory, &task.filename,
+    ).is_some()
+}
+
 fn render_signature(task: &TaskView, checked: bool, file_available: bool) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     task.filename.hash(&mut hasher);
@@ -644,8 +692,12 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
             .or_else(|| snapshot.downloads.iter().max_by_key(|t| t.created_at))
             .map(|t| t.id.clone()).unwrap_or_default();
     }
-    state.checked.retain(|id| snapshot.downloads.iter().any(|t| t.id == *id && t.status == "completed"));
+    // Selection is not limited to completed history: failed, paused, and queued
+    // rows stay selectable so they can be removed in bulk.
+    retain_known_checked(&mut state.checked, &snapshot.downloads);
     ui.set_checked_count(state.checked.len() as i32);
+    ui.set_has_pausable_downloads(snapshot.downloads.iter().any(|t| running(&t.status)));
+    ui.set_has_paused_downloads(snapshot.downloads.iter().any(|t| t.status == "paused"));
     ui.set_transfer_active(snapshot.downloads.iter().any(|t| matches!(t.status.as_str(), "waiting" | "downloading" | "preparing" | "probing" | "connecting" | "assembling" | "merging" | "verifying")));
     ui.set_selected_id(state.selected.clone().into());
     if state.last_speed_sample.map_or(true, |t| t.elapsed() >= Duration::from_secs(1)) {
@@ -669,6 +721,10 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
     ui.set_total_label(snapshot.downloads.len().to_string().into());
     ui.set_connection_label(snapshot.settings.connections.to_string().into());
     ui.set_download_directory(snapshot.settings.download_dir.clone().into());
+    // Re-poll completed outputs periodically. The old per-row cache could stay
+    // false forever if a file was committed after the first render.
+    let recheck_files = state.last_file_check.is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+    if recheck_files { state.last_file_check = Some(Instant::now()); }
     let ordered: Vec<&TaskView> = newest_first(&snapshot.downloads).into_iter().filter(|task| match state.filter {
         1 => visible_in_filter(&task.status, 1), 2 => visible_in_filter(&task.status, 2), _ => true,
     }).collect();
@@ -684,7 +740,7 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
         let mut sigs = Vec::with_capacity(ordered.len());
         let mut avail = Vec::with_capacity(ordered.len());
         let items: Vec<DownloadItem> = ordered.iter().map(|task| {
-            let available = task.file_path.as_ref().is_some_and(|p| Path::new(p).is_file());
+            let available = completed_file_exists(task);
             avail.push(available);
             sigs.push(render_signature(task, state.checked.contains(&task.id), available));
             build_item(task, state.checked.contains(&task.id), available)
@@ -697,7 +753,9 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
         // Telemetry-only tick: order and membership are identical, so refresh just the
         // rows whose rendered output moved. The filesystem is not re-polled here.
         for (index, task) in ordered.iter().enumerate() {
-            let available = state.row_avail.get(index).copied().unwrap_or(false);
+            let available = if recheck_files { completed_file_exists(task) }
+                else { state.row_avail.get(index).copied().unwrap_or(false) };
+            if recheck_files { state.row_avail[index] = available; }
             let checked = state.checked.contains(&task.id);
             let sig = render_signature(task, checked, available);
             if state.row_sig.get(index) != Some(&sig) {
@@ -873,6 +931,7 @@ fn hwnd(ui: &QdmWindow) -> Option<HWND> {
     window_handle(&ui.window())
 }
 fn show(ui: &QdmWindow) {
+    std::env::remove_var("QDM_STARTUP_TRAY_ONLY");
     let _ = ui.show();
     if let Some(handle) = hwnd(ui) { unsafe { ShowWindow(handle, SW_RESTORE); SetForegroundWindow(handle); } }
 }
@@ -952,7 +1011,7 @@ fn clipboard_text() -> Option<String> {
     }
 }
 
-pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path) -> Result<(), String> {
+pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path, start_hidden: bool) -> Result<(), String> {
     // The measured portrait UI sustains the display cadence with much smaller
     // private memory in the software renderer. Keep an explicit backend override
     // available for different displays/drivers and diagnostic comparisons.
@@ -989,7 +1048,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
     let state = Rc::new(RefCell::new(ViewState {
         snapshot: Snapshot::default(), speed_history: HashMap::new(), last_speed_sample: None, selected: String::new(), checked: HashSet::new(), filter: 0, known_ids: None,
         toast_until: None, preferences, clipboard: ClipboardWatcher::new(), clipboard_seq: 0,
-        order_key: 0, row_sig: Vec::new(), row_avail: Vec::new(),
+        order_key: 0, row_sig: Vec::new(), row_avail: Vec::new(), last_file_check: None,
     }));
     { let weak = popup.as_weak(); let queue = completions.clone(); let shown = popup_shown.clone(); let slide = slide.clone(); let morph = morph.clone(); let progress_id = progress_id.clone(); let dismissed = progress_dismissed.clone(); let until = completion_until.clone(); let state = state.clone();
       popup.on_dismiss(move || if let Some(popup) = weak.upgrade() {
@@ -1037,7 +1096,9 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
                 let item = queue.borrow().front().cloned();
                 if let Some(item) = item {
                     // RevealFile resolves a missing file path using the engine's task directory.
-                    let exists = $folder || item.file_path.as_deref().is_some_and(|path| Path::new(path).is_file());
+                    let exists = $folder || state.borrow().snapshot.downloads.iter()
+                        .find(|task| task.id == item.id)
+                        .is_some_and(completed_file_exists);
                     if !exists {
                         popup.set_completion_path("File or folder is unavailable. Dismiss to continue.".into());
                     } else if tx.send(Command::$variant(item.id)).is_err() {
@@ -1128,6 +1189,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
     { let weak = ui.as_weak(); let state = state.clone(); let jobs = jobs.clone(); let lanes = lanes.clone();
       ui.on_toggle_checked(move |id| if let Some(ui) = weak.upgrade() {
           let id = id.to_string(); let mut state = state.borrow_mut();
+          if !state.snapshot.downloads.iter().any(|task| task.id == id) { return; }
           if !state.checked.remove(&id) { state.checked.insert(id); }
           render(&ui, &mut state, &jobs, &lanes);
       }); }
@@ -1138,7 +1200,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
     { let weak = ui.as_weak(); let state = state.clone(); let jobs = jobs.clone(); let lanes = lanes.clone();
       ui.on_select_all_visible(move || if let Some(ui) = weak.upgrade() {
           let mut state = state.borrow_mut();
-          let ids: Vec<_> = state.snapshot.downloads.iter().filter(|t| t.status == "completed" && state.filter != 1).map(|t| t.id.clone()).collect();
+          let ids = visible_ids(&state.snapshot.downloads, state.filter);
           state.checked.extend(ids); render(&ui, &mut state, &jobs, &lanes);
       }); }
     { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone(); let jobs = jobs.clone(); let lanes = lanes.clone();
@@ -1149,7 +1211,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
           let Some(owner) = hwnd(&ui) else { return; };
           unsafe {
               let menu = CreatePopupMenu(); if menu.is_null() { return; }
-              let open_enabled = task.status == "completed" && task.file_path.as_ref().is_some_and(|p| Path::new(p).is_file());
+              let open_enabled = completed_file_exists(&task);
               let label = crate::platform::wide("Open file"); AppendMenuW(menu, MF_STRING | if open_enabled { 0 } else { MF_GRAYED }, 1, label.as_ptr());
               let label = crate::platform::wide("Open file location"); AppendMenuW(menu, MF_STRING, 2, label.as_ptr());
               let label = crate::platform::wide("Remove"); AppendMenuW(menu, MF_STRING, 3, label.as_ptr());
@@ -1162,6 +1224,8 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
       }); }
     { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
       ui.on_open_download(move |id| if let Some(ui) = weak.upgrade() { send(&tx, Command::OpenFile(id.to_string()), &ui, &state); }); }
+    { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
+      ui.on_reveal_download(move |id| if let Some(ui) = weak.upgrade() { send(&tx, Command::RevealFile(id.to_string()), &ui, &state); }); }
     { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone();
       ui.on_remove_checked(move || if let Some(ui) = weak.upgrade() {
           let ids: Vec<_> = state.borrow().checked.iter().cloned().collect();
@@ -1384,6 +1448,14 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
               }
               if let Some(tray) = tray_weak.upgrade() { tray.set_status(format!("QDM · {} active · {}", ui.get_active_label(), ui.get_aggregate_speed()).into()); }
           }
+          // File availability must update even when the engine is idle and emits no new snapshot.
+          // In particular, files restored/moved back into place must clear File missing.
+          {
+              let mut view = state.borrow_mut();
+              if view.last_file_check.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+                  render(&ui, &mut view, &jobs, &lanes);
+              }
+          }
           // A completion card retracts on its own after ten seconds without action.
           if !completions.borrow().is_empty()
               && completion_until.get().is_some_and(|until| Instant::now() >= until)
@@ -1479,8 +1551,22 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
           if disconnected { let _ = slint::quit_event_loop(); }
       }); }
     tray.show().map_err(|e| e.to_string())?;
+    if start_hidden { std::env::set_var("QDM_STARTUP_TRAY_ONLY", "1"); }
     ui.show().map_err(|e| e.to_string())?;
+    if start_hidden { ui.hide().map_err(|e| e.to_string())?; }
     native_setup(&ui);
+    // Keep the window registered for second-instance restore while hiding it on startup.
+    if start_hidden {
+        if let Some(handle) = hwnd(&ui) { unsafe { ShowWindow(handle, SW_HIDE); } }
+    }
+    if start_hidden {
+        let weak = ui.as_weak();
+        Timer::single_shot(Duration::from_millis(1000), move || {
+            if let Some(ui) = weak.upgrade() {
+                if let Some(handle) = hwnd(&ui) { unsafe { ShowWindow(handle, SW_HIDE); } }
+            }
+        });
+    }
     slide.anchor.set(hwnd(&ui));
     let result = slint::run_event_loop_until_quit().map_err(|e| e.to_string());
     timer.stop();
@@ -1563,6 +1649,28 @@ mod tests {
         // Clamped, so an interrupted morph can never resize the window off-bounds.
         assert_eq!(popup_logical_height(-1.0), POPUP_COMPACT_HEIGHT as f32);
         assert_eq!(popup_logical_height(2.0), POPUP_FULL_HEIGHT as f32);
+    }
+
+    #[test]
+    fn notification_progress_switches_to_real_assembly_bytes() {
+        let mut task = TaskView { status: "assembling".into(), ..TaskView::default() };
+        task.downloaded_bytes = 1000;
+        task.total_bytes = Some(1000);
+        task.assembly_bytes = 250;
+        task.assembly_total_bytes = 1000;
+        let (stage, indeterminate, progress, label) = notification_stage(&task);
+        assert!(stage && !indeterminate);
+        assert!((progress - 0.25).abs() < 0.001);
+        assert!(label.contains("25.0%"));
+        task.status = "verifying".into();
+        task.assembly_total_bytes = 0;
+        let (stage, indeterminate, progress, _) = notification_stage(&task);
+        assert!(stage && indeterminate);
+        assert_eq!(progress, 0.0);
+        task.status = "downloading".into();
+        let (stage, _, progress, _) = notification_stage(&task);
+        assert!(!stage);
+        assert_eq!(progress, 1.0);
     }
 
     #[test]
@@ -1662,6 +1770,24 @@ mod tests {
         assert!(!visible_in_filter("completed", 1));
         assert!(visible_in_filter("completed", 2));
         assert!(!visible_in_filter("paused", 2));
+    }
+
+    #[test]
+    fn bulk_selection_covers_failed_and_paused_rows() {
+        let task = |id: &str, status: &str| TaskView { id: id.into(), status: status.into(), ..TaskView::default() };
+        let downloads = vec![
+            task("done", "completed"), task("broken", "error"), task("stale", "failed"),
+            task("held", "paused"), task("live", "downloading"),
+        ];
+        let mut checked: HashSet<String> = downloads.iter().map(|task| task.id.clone()).collect();
+        retain_known_checked(&mut checked, &downloads);
+        assert_eq!(checked.len(), 5, "failed and paused ids must survive a render");
+        checked.insert("gone".into());
+        retain_known_checked(&mut checked, &downloads);
+        assert!(!checked.contains("gone"), "removed downloads must leave the selection");
+        assert_eq!(visible_ids(&downloads, 0), vec!["done", "broken", "stale", "held", "live"]);
+        assert_eq!(visible_ids(&downloads, 1), vec!["broken", "stale", "held", "live"]);
+        assert_eq!(visible_ids(&downloads, 2), vec!["done"]);
     }
 
     #[test]

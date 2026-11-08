@@ -41,6 +41,20 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir())
         .join("QDM")
 }
+/// Resolve an existing completed output without trusting a stale UI existence cache.
+/// The fallback is limited to the recorded directory and a single filename.
+pub fn existing_download_path(file_path: Option<&str>, directory: &str, filename: &str) -> Option<PathBuf> {
+    if let Some(path) = file_path.filter(|path| !path.trim().is_empty()) {
+        let candidate = Path::new(path);
+        if candidate.is_file() { return Some(candidate.to_path_buf()); }
+    }
+    if filename.is_empty() || Path::new(filename).components().count() != 1 { return None; }
+    let directory = Path::new(directory);
+    if !directory.is_absolute() { return None; }
+    let candidate = directory.join(filename);
+    candidate.is_file().then_some(candidate)
+}
+
 pub fn download_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -258,4 +272,28 @@ pub fn protect(bytes: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(windows)]
 pub fn unprotect(bytes: &[u8]) -> Result<Vec<u8>, String> {
     crypt(bytes, false)
+}
+
+#[cfg(test)]
+mod output_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_recorded_file_and_directory_fallback_without_guessing_other_folders() {
+        let directory = std::env::temp_dir().join(format!("qdm-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let filename = "present.bin";
+        let actual = directory.join(filename);
+        std::fs::write(&actual, b"test bytes").unwrap();
+        let dir = directory.to_string_lossy();
+        let stale = directory.join("missing.bin");
+        assert_eq!(existing_download_path(Some(&actual.to_string_lossy()), &dir, filename), Some(actual.clone()));
+        assert_eq!(existing_download_path(Some(&stale.to_string_lossy()), &dir, filename), Some(actual.clone()));
+        assert_eq!(existing_download_path(None, &dir, filename), Some(actual.clone()));
+        assert_eq!(existing_download_path(None, &dir, "absent.bin"), None);
+        assert_eq!(existing_download_path(None, &dir, "../outside.bin"), None);
+        std::fs::remove_file(&actual).unwrap();
+        assert_eq!(existing_download_path(Some(&actual.to_string_lossy()), &dir, filename), None);
+        std::fs::remove_dir(&directory).unwrap();
+    }
 }
