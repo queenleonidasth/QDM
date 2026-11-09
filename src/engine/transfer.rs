@@ -22,6 +22,12 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(3);
 const STARTUP_INTERVAL: Duration = Duration::from_millis(100);
 const INITIAL_CONNECTIONS: u8 = 2;
+const SHED_GRACE: Duration = Duration::from_secs(2);
+const SHED_RATIO: f64 = 4.0;
+const SHED_LEFT: f64 = 2.0;
+const MAX_SHEDS_PER_PART: u8 = 2;
+const SHED_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+
 // Tokio dispatches ordinary file writes to its blocking pool. Coalesce small
 // network frames without buffering a whole part/file: 16 MiB at 64 workers.
 const PART_BUFFER_BYTES: usize = 256 * 1024;
@@ -74,11 +80,53 @@ fn split_ready_at(part: &Part, now: Instant, setup: Duration) -> Option<Instant>
     // For a large outstanding download, avoid holding all spare workers for
     // nearly a minute solely because a CDN had an expensive first response.
     // Small tails retain the full setup-cost deferral to avoid slower finishes.
-    let cap = if part.remaining() >= 32 * MIN_SEGMENT {
+    let cap = if part.remaining() >= 2 * 1024 * 1024 {
         Duration::from_secs(3)
     } else { NETWORK_IDLE };
     let wait = (useful_age - age).max(0.0).min(cap.as_secs_f64());
     Some(now + Duration::from_secs_f64(wait))
+}
+
+// Compare byte rates only after both streams have received real payload.
+// A failed request must not count against a producer that simply has not
+// finished its TLS / HTTP setup, and a configured rate limiter can make every
+// connection appear artificially slow.
+// Sliding 500ms payload window: measured progress rather than average speed
+// since response headers. It decays to zero when a previously fast stream stalls.
+fn update_part_rate(part: &mut Part, now: Instant) {
+    if !part.active || part.response_end == 0 { return; }
+    let Some(started) = part.response_started_at else { return; };
+    let at = part.speed_sample_at.unwrap_or(started);
+    let elapsed = now.saturating_duration_since(at);
+    if elapsed < SHED_SAMPLE_INTERVAL { return; }
+    let delta = part.response_payload_bytes.saturating_sub(part.speed_sample_bytes);
+    part.speed_bps = delta as f64 / elapsed.as_secs_f64().max(0.001);
+    part.speed_sample_at = Some(now);
+    part.speed_sample_bytes = part.response_payload_bytes;
+}
+
+fn should_shed_slow(part: &Part, fastest_bps: f64, now: Instant, limited: bool) -> bool {
+    if limited || part.shed_attempts >= MAX_SHEDS_PER_PART || fastest_bps <= 0.0
+        || !part.active || part.response_end == 0 || part.response_payload_bytes == 0 {
+        return false;
+    }
+    let Some(started) = part.response_started_at else { return false; };
+    let elapsed = now.saturating_duration_since(started);
+    if elapsed < SHED_GRACE { return false; }
+    let speed = if part.speed_sample_at.is_some() { part.speed_bps } else {
+        part.response_payload_bytes as f64 / elapsed.as_secs_f64().max(0.001)
+    };
+    speed < fastest_bps / SHED_RATIO
+        && (part.remaining() as f64 / speed.max(1.0)) > SHED_LEFT
+}
+
+// Only a pending HTTP header can be preempted. A receiving response owns
+// validated bytes and cannot be stolen without violating single-writer safety.
+fn preempt_ready_at(part: &Part, ttfb: Duration) -> Option<Instant> {
+    if !part.active || part.response_end != 0 || part.response_payload_bytes != 0
+        || part.preempt_requested || part.preempt_attempts > 0 { return None; }
+    let started = part.request_started_at?;
+    Some(started + ttfb.saturating_mul(2).max(Duration::from_millis(20)))
 }
 
 // Response coverage must disappear before a worker checkpoints a completed
@@ -97,6 +145,9 @@ impl Drop for ResponseCoverage {
                 part.request_started_at = None;
                 part.response_started_at = None;
                 part.response_payload_bytes = 0;
+                part.speed_sample_at = None;
+                part.speed_sample_bytes = 0;
+                part.speed_bps = 0.0;
             }
         }
     }
@@ -1113,12 +1164,60 @@ impl Engine {
                 return Ok(Claim::Part(part));
             }
         }
-        let next_check = match (task.startup_next_growth.filter(|when| *when > now), next_split_check) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        // A spare worker can ask a stalled, header-pending connection to
+        // release its lease. The old worker cancels its request first; only
+        // then may another worker claim the part. Never preempt a live body.
+        let ttfb = Duration::from_micros(task.request_setup_micros.max(250_000));
+        let mut next_preempt_check: Option<Instant> = None;
+        for part in &mut task.parts {
+            if let Some(ready) = preempt_ready_at(part, ttfb) {
+                if ready <= now {
+                    part.preempt_requested = true;
+                    part.preempt_attempts += 1;
+                    self.inner.work_changed.notify_waiters();
+                    break;
+                }
+                next_preempt_check = Some(next_preempt_check.map(|old| old.min(ready)).unwrap_or(ready));
+            }
+        }
+        let next_check = [task.startup_next_growth.filter(|when| *when > now),
+            next_split_check, next_preempt_check]
+            .into_iter().flatten().min();
         Ok(next_check
             .map(Claim::WaitUntil).unwrap_or(Claim::Wait))
+    }
+
+    fn is_preempt_requested(&self, id: &str, part_id: u64) -> bool {
+        let state = lock(&self.inner.state);
+        state.tasks.iter().find(|task| task.view.id == id)
+            .and_then(|task| task.parts.iter().find(|part| part.id == part_id))
+            .is_some_and(|part| part.preempt_requested)
+    }
+
+    fn maybe_shed_part(&self, id: &str, part_id: u64) -> bool {
+        let mut state = lock(&self.inner.state);
+        let limited = state.settings.speed_limit_kib > 0;
+        let enabled = state.settings.shed_slow;
+        let Some(task) = state.tasks.iter().find(|task| task.view.id == id) else { return false; };
+        let queue_key = if task.view.queue.is_empty() { "Default" } else { task.view.queue.as_str() };
+        let limited = limited || task.view.speed_limit_kib > 0
+            || state.settings.queue_speed_limits.get(queue_key).copied().unwrap_or(0) > 0;
+        let active_receiving = task.parts.iter().filter(|p| p.active && p.response_payload_bytes > 0).count();
+        if !enabled || limited || active_receiving < 2 { return false; }
+        let now = Instant::now();
+        let Some(task) = state.tasks.iter_mut().find(|task| task.view.id == id) else { return false; };
+        for part in &mut task.parts { update_part_rate(part, now); }
+        // A fast reference stream need not be two seconds old. Grace applies
+        // only to the slow candidate, otherwise a continuously rotating set
+        // of fast segments never qualifies as a best-speed reference.
+        let best = task.parts.iter().filter(|part| part.active && part.response_end > 0
+            && part.response_payload_bytes > 0)
+            .map(|part| part.speed_bps).fold(0.0_f64, f64::max);
+        let Some(part) = task.parts.iter_mut().find(|part| part.id == part_id) else { return false; };
+        if !should_shed_slow(part, best, now, limited) { return false; }
+        part.shed_attempts += 1;
+        trace_transfer("shed-slow", || serde_json::json!({"task": id,"part": part_id,"attempt": part.shed_attempts}));
+        true
     }
 
     async fn run_ranges(
@@ -1205,6 +1304,7 @@ impl Engine {
                     // Install the shared request gate before releasing this
                     // piece, so another worker cannot immediately retry it.
                     let result = match result {
+                        Err(Fault::Retry(message, _)) if message == "Shed slow response" || message == "Preempt pending response" => Ok(()),
                         Err(Fault::Retry(message, delay)) if message.contains("HTTP 429") =>
                             self.backoff_origin(id, part.id, true, &message, delay),
                         Err(Fault::Retry(message, _)) if message == "Range request refused with HTTP 200" =>
@@ -1218,6 +1318,7 @@ impl Engine {
                         if let Some(task) = state.tasks.iter_mut().find(|t| t.view.id == id) {
                             if let Some(piece) = task.parts.iter_mut().find(|p| p.id == part.id) {
                                 piece.active = false;
+                                piece.preempt_requested = false;
                                 piece.reserved = 0;
                                 if let Some(lane) = task.lane_activity.get_mut(slot as usize) {
                                     lane.current_bytes = piece.downloaded;
@@ -1296,15 +1397,36 @@ impl Engine {
                 else { task.request_setup_micros.saturating_mul(3).saturating_add(sample.max(1000)) / 4 };
             task.startup_ready_slots |= 1u64 << slot;
             if !task.adaptive_starting || task.adaptive_limit >= configured { return; }
+            // A fast, low-latency origin (first byte well under ~50 ms) has
+            // already proven it accepts a connection cheaply: reach the
+            // configured limit at once instead of doubling with a probe delay,
+            // so a large download is not capped to 2-4 sockets for its first
+            // ~200 ms. Expensive origins keep the conservative ramp below, so a
+            // fast short tail is never subdivided into latency-dominated
+            // requests (tests/tail-scheduling.cjs setup-cost). The learned
+            // origin_budget still bounds the real per-host cap.
+            if Duration::from_micros(task.request_setup_micros.max(1000)) < Duration::from_millis(50) {
+                task.adaptive_limit = configured;
+                task.adaptive_starting = false;
+                task.startup_next_growth = None;
+                task.adaptive_last_change = Some(Instant::now());
+                self.inner.work_changed.notify_waiters();
+                return;
+            }
             // One productive stream can trigger a controlled probe. Do not
             // wait forever for every slow or idle startup worker to send data.
             if task.startup_next_growth.is_none() {
                 let now = Instant::now();
-                let elapsed = task.adaptive_last_change
-                    .map(|at| now.saturating_duration_since(at))
-                    .unwrap_or(STARTUP_INTERVAL);
-                let wait = Duration::from_millis(750).saturating_sub(elapsed)
-                    .max(STARTUP_INTERVAL);
+                // Scale the ramp to the origin's measured setup cost (an EWMA of
+                // first-byte times, like MDM's preempt_after = 2x TTFB). A cheap,
+                // low-latency origin reaches the connection limit in a couple of
+                // quick doublings; an expensive one stays conservative so a fast
+                // short tail is never subdivided into latency-dominated requests
+                // (see tests/tail-scheduling.cjs). Bounded by the old 750 ms cap.
+                let setup = Duration::from_micros(task.request_setup_micros.max(1000));
+                let wait = setup
+                    .saturating_mul(2)
+                    .clamp(STARTUP_INTERVAL, Duration::from_millis(750));
                 task.startup_next_growth = Some(now + wait);
                 self.inner.work_changed.notify_waiters();
             }
@@ -1496,6 +1618,7 @@ impl Engine {
             match result {
                 Err(Fault::Retry(ref message, _)) if message.contains("HTTP 429") || message == "Range request refused with HTTP 200" => break,
                 Err(Fault::Transport(_, _)) => break,
+                Err(Fault::Retry(ref message, _)) if message == "Shed slow response" || message == "Preempt pending response" => break,
                 Err(Fault::Retry(ref message, delay)) if attempt < retries => {
                     self.delay_retry(id, attempt, message, delay, stop).await?
                 }
@@ -1520,10 +1643,13 @@ impl Engine {
             return Ok(());
         }
         let cursor = part.start + part.downloaded;
+        // 12 KiB split pieces must not redownload a 32 KiB prefix on every
+        // request. Keep the full 32 KiB overlap on larger pieces/resumes.
+        let overlap = OVERLAP.min(part.len());
         let wire_start = if part.downloaded > 0 {
-            cursor.saturating_sub(OVERLAP).max(part.start)
+            cursor.saturating_sub(overlap).max(part.start)
         } else {
-            part.start.saturating_sub(OVERLAP)
+            part.start.saturating_sub(overlap)
         };
         let wire_end = part.end - 1;
         let prefix_len = (cursor - wire_start) as usize;
@@ -1558,9 +1684,13 @@ impl Engine {
                     current.request_started_at = Some(request_started);
                     current.response_started_at = None;
                     current.response_payload_bytes = 0;
+                    current.speed_sample_at = None;
+                    current.speed_sample_bytes = 0;
+                    current.speed_bps = 0.0;
                 }
             }
         }
+        self.inner.work_changed.notify_waiters();
         // Cover header failures as well as successful bodies so no stale
         // request age can remain after a retry, cancellation or panic.
         let _coverage = ResponseCoverage { engine: self.clone(), task_id: id.to_string(), part_id };
@@ -1568,7 +1698,23 @@ impl Engine {
             "task": id, "part": part_id, "start": wire_start, "end": wire_end,
             "savedBytes": part.downloaded, "slot": part.owner_lane,
         }));
-        let mut response = network(stop, HEADER_TIMEOUT, request.send()).await?;
+        let mut response = {
+            let send = network(stop, HEADER_TIMEOUT, request.send());
+            tokio::pin!(send);
+            loop {
+                tokio::select! {biased;
+                    result = &mut send => break result?,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if self.is_preempt_requested(id, part_id) {
+                            return Err(Fault::Retry("Preempt pending response".into(), Duration::ZERO));
+                        }
+                    },
+                }
+            }
+        };
+        if self.is_preempt_requested(id, part_id) {
+            return Err(Fault::Retry("Preempt pending response".into(), Duration::ZERO));
+        }
         trace_headers(id, Some(part_id), &response, request_started);
         validate_range(&response, wire_start, wire_end, meta)?;
         {
@@ -1577,13 +1723,40 @@ impl Engine {
                 if let Some(current) = task.parts.iter_mut().find(|part| part.id == part_id) {
                     current.response_end = wire_end + 1;
                     current.response_started_at = Some(Instant::now());
+                    current.speed_sample_at = current.response_started_at;
+                    current.speed_sample_bytes = 0;
+                    current.speed_bps = 0.0;
                 }
             }
         }
         let mut prefix = Vec::with_capacity(prefix_len);
         let mut last_checkpoint = Instant::now();
         let mut first_body = true;
-        while let Some(chunk) = network(stop, NETWORK_IDLE, response.chunk()).await? {
+        let mut next_shed_check = Instant::now() + SHED_SAMPLE_INTERVAL;
+        loop {
+            // A part must only be abandoned between complete disk writes, and
+            // only when at least one other productive worker proves a much
+            // faster lane. This does not consume the network retry budget.
+            // Preserve one in-flight read (and its 45-second timeout) across
+            // repeated shedding checks. Recreating response.chunk() on every
+            // timer tick would reset the idle deadline indefinitely.
+            let chunk = {
+                let next_chunk = network(stop, NETWORK_IDLE, response.chunk());
+                tokio::pin!(next_chunk);
+                loop {
+                    tokio::select! { biased;
+                        result = &mut next_chunk => break result?,
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_shed_check)) => {
+                            next_shed_check = Instant::now() + SHED_SAMPLE_INTERVAL;
+                            if self.maybe_shed_part(id, part_id) {
+                                self.inner.work_changed.notify_waiters();
+                                return Err(Fault::Retry("Shed slow response".into(), Duration::ZERO));
+                            }
+                        },
+                    }
+                }
+            };
+            let Some(chunk) = chunk else { break };
             if first_body && !chunk.is_empty() {
                 first_body = false;
                 self.note_healthy_body(id, part.owner_lane, request_started.elapsed());
@@ -1685,6 +1858,15 @@ impl Engine {
                 last_checkpoint = Instant::now();
             }
             stop.check()?;
+            // Fast, frequent small network chunks never leave the read pending
+            // for 500 ms. Poll the same deadline after each accepted chunk.
+            if Instant::now() >= next_shed_check {
+                next_shed_check = Instant::now() + SHED_SAMPLE_INTERVAL;
+                if self.maybe_shed_part(id, part_id) {
+                    self.inner.work_changed.notify_waiters();
+                    return Err(Fault::Retry("Shed slow response".into(), Duration::ZERO));
+                }
+            }
         }
         let current = self.current_part(id, part_id)?;
         if current.downloaded == current.len() {
@@ -2426,7 +2608,7 @@ impl Engine {
             }
             // Recover a boundary witness even if a crash happened before its metadata checkpoint.
             if part.start > 0 {
-                let start = part.start.saturating_sub(OVERLAP);
+                let start = part.start.saturating_sub(OVERLAP.min(part.len()));
                 let bytes = self
                     .sample_range(id, start, part.start - 1, meta, stop)
                     .await?;
@@ -2502,6 +2684,75 @@ mod tests {
         assert!(!part.record_transport_failure(2));
     }
     use super::*;
+
+    #[test]
+    fn pending_header_can_be_preempted_once_but_receiving_piece_cannot() {
+        let started = Instant::now() - Duration::from_secs(1);
+        let part = Part { id: 2, active: true, end: 1024 * 1024,
+            request_started_at: Some(started), ..Part::default() };
+        let ttfb = Duration::from_millis(200);
+        assert!(preempt_ready_at(&part, ttfb).unwrap() < Instant::now());
+        let mut receiving = part.clone();
+        receiving.response_end = receiving.end;
+        assert!(preempt_ready_at(&receiving, ttfb).is_none());
+        let mut claimed = part.clone();
+        claimed.preempt_attempts = 1;
+        assert!(preempt_ready_at(&claimed, ttfb).is_none());
+        claimed.preempt_attempts = 0;
+        claimed.preempt_requested = true;
+        assert!(preempt_ready_at(&claimed, ttfb).is_none());
+    }
+
+    #[test]
+    fn rolling_connection_rate_tracks_stalls_and_does_not_use_lifetime_average() {
+        let now = Instant::now();
+        let mut part = Part { id: 1, end: 8 * 1024 * 1024, active: true,
+            response_end: 8 * 1024 * 1024,
+            response_started_at: Some(now - Duration::from_secs(4)),
+            response_payload_bytes: 1024 * 1024,
+            speed_sample_at: Some(now - Duration::from_secs(1)),
+            speed_sample_bytes: 1024 * 1024,
+            ..Part::default()
+        };
+        update_part_rate(&mut part, now);
+        assert_eq!(part.speed_bps, 0.0, "stalled stream has zero current speed");
+        assert!(should_shed_slow(&part, 2.0 * 1024.0 * 1024.0, now, false));
+        part.response_payload_bytes += 512 * 1024;
+        update_part_rate(&mut part, now + Duration::from_secs(1));
+        assert!(part.speed_bps >= 512.0 * 1024.0 - 1.0);
+        assert!(!should_shed_slow(&part, 1024.0 * 1024.0, now + Duration::from_secs(1), false));
+    }
+
+    #[test]
+    fn slow_stream_is_shed_only_after_grace_without_throttle_or_repeat_thrash() {
+        let now = Instant::now();
+        let slow = Part {
+            id: 2, start: 0, end: 4 * 1024 * 1024,
+            downloaded: 30 * 1024, response_payload_bytes: 30 * 1024,
+            response_end: 4 * 1024 * 1024, active: true,
+            response_started_at: Some(now - Duration::from_secs(3)),
+            ..Part::default()
+        };
+        assert!(should_shed_slow(&slow, 1024.0 * 1024.0, now, false));
+        assert!(!should_shed_slow(&slow, 1024.0 * 1024.0, now, true));
+        assert!(!should_shed_slow(&slow, 30.0 * 1024.0, now, false));
+        let mut too_young = slow.clone();
+        too_young.response_started_at = Some(now - Duration::from_millis(250));
+        assert!(!should_shed_slow(&too_young, 1024.0 * 1024.0, now, false));
+        let mut exhausted = slow.clone();
+        exhausted.shed_attempts = MAX_SHEDS_PER_PART;
+        assert!(!should_shed_slow(&exhausted, 1024.0 * 1024.0, now, false));
+        let mut nearly_done = slow.clone();
+        nearly_done.downloaded = nearly_done.end - 1024;
+        assert!(!should_shed_slow(&nearly_done, 1024.0 * 1024.0, now, false));
+    }
+
+    #[test]
+    fn minimum_segment_is_12k_and_resumption_overlap_cannot_exceed_piece() {
+        assert_eq!(MIN_SEGMENT, 12 * 1024);
+        assert_eq!(OVERLAP.min(MIN_SEGMENT), 12 * 1024);
+        assert!(2 * MIN_SEGMENT <= 128 * 1024);
+    }
 
     #[test]
     fn split_requires_current_response_payload_and_enough_remaining_bytes() {

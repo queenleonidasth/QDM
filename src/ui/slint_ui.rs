@@ -904,6 +904,7 @@ fn parse_queue_configs(value: &str) -> Result<BTreeMap<String, QueueConfig>, Str
 fn settings_from(ui: &QdmWindow, base: &Settings) -> Result<Settings, String> {
     let mut settings = base.clone();
     settings.connections = ui.get_setting_connections().trim().parse::<u8>().ok().filter(|n| (1..=64).contains(n)).ok_or("Connections must be a whole number from 1 to 64.")?;
+    settings.shed_slow = ui.get_setting_shed_slow();
     settings.max_concurrent = ui.get_setting_concurrent().trim().parse::<u8>().ok().filter(|n| (1..=8).contains(n)).ok_or("Concurrent downloads must be a whole number from 1 to 8.")?;
     settings.speed_limit_kib = ui.get_setting_speed().trim().parse::<u64>().map_err(|_| "Speed limit must be a non-negative whole number.")?;
     settings.retries = ui.get_setting_retries().trim().parse::<u8>().ok().filter(|n| *n <= 8).ok_or("Retry attempts must be from 0 to 8.")?;
@@ -1333,6 +1334,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
       ui.on_open_settings(move || if let Some(ui) = weak.upgrade() {
           let settings = state.borrow().snapshot.settings.clone();
           ui.set_setting_connections(settings.connections.to_string().into());
+        ui.set_setting_shed_slow(settings.shed_slow);
           ui.set_setting_concurrent(settings.max_concurrent.to_string().into());
            ui.set_setting_speed(settings.speed_limit_kib.to_string().into());
            ui.set_setting_retries(settings.retries.to_string().into());

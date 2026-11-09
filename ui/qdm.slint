@@ -467,7 +467,7 @@ export component QdmWindow inherits Window {
     in property <string> selected-bytes: "0 B / —";
     in property <string> selected-speed: "—";
     in property <string> selected-eta: "—";
-    in property <string> selected-connections: "0 / 32";
+    in property <string> selected-connections: "0 / 8";
     in property <string> selected-percent: "0%";
     in property <float> selected-progress: 0;
     in property <string> selected-notice;
@@ -493,7 +493,8 @@ export component QdmWindow inherits Window {
     in-out property <bool> remove-open: false;
     in-out property <bool> delete-local-files: false;
     in-out property <bool> reduced-motion <=> Theme.reduced-motion;
-    in-out property <string> setting-connections: "32";
+    in-out property <string> setting-connections: "8";
+    in-out property <bool> setting-shed-slow: true;
     in-out property <string> setting-concurrent: "2";
     in-out property <string> setting-speed: "0";
     in-out property <string> setting-retries: "3";
@@ -908,7 +909,7 @@ export component QdmWindow inherits Window {
                                 Text { text: "0–8 retries"; color: Theme.faint; font-size: 12px; }
                             }
                         }
-                        Text { x: 0px; y: 209px; width: parent.width; height: 28px; text: "QDM adapts to each server. More connections are not always faster."; color: Theme.faint; font-size: 12px; wrap: word-wrap; vertical-alignment: top; }
+                        GoldCheckBox { x: 0px; y: 211px; height: 22px; text: "Replace unusually slow connections"; checked <=> root.setting-shed-slow; }
                         Rectangle { x: 0px; y: 246px; width: parent.width; height: 1px; background: Theme.edge; }
                         Text { x: 0px; y: 262px; width: parent.width; height: 13px; text: "FILES & APPEARANCE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.3px; }
                         Text { x: 0px; y: 290px; width: parent.width; height: 14px; text: "Download folder"; color: Theme.muted; font-size: 13px; }

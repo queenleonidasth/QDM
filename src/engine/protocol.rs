@@ -7,7 +7,7 @@ use std::{
 use url::Url;
 
 pub const OVERLAP: u64 = 32 * 1024;
-pub const MIN_SEGMENT: u64 = 64 * 1024;
+pub const MIN_SEGMENT: u64 = 12 * 1024;
 
 pub fn is_chatgpt_session_download(url: &Url) -> bool {
     matches!(url.host_str(), Some("chatgpt.com" | "chat.openai.com"))

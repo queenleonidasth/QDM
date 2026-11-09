@@ -1,6 +1,7 @@
 //! QDM native engine: independent checked byte ownership in a single positioned-write file.
 //! Request overlap is checked before appending and again across piece boundaries.
 pub(crate) mod protocol;
+mod dns;
 mod transfer;
 mod store;
 
@@ -72,6 +73,18 @@ struct Part {
     response_started_at: Option<Instant>,
     #[serde(skip)]
     response_payload_bytes: u64,
+    #[serde(skip)]
+    shed_attempts: u8,
+    #[serde(skip)]
+    speed_sample_at: Option<Instant>,
+    #[serde(skip)]
+    speed_sample_bytes: u64,
+    #[serde(skip)]
+    speed_bps: f64,
+    #[serde(skip)]
+    preempt_requested: bool,
+    #[serde(skip)]
+    preempt_attempts: u8,
     #[serde(default)]
     overlap_start: u64,
     #[serde(default)]
@@ -338,6 +351,7 @@ struct Inner {
     events: broadcast::Sender<Snapshot>,
     client: Client,
     stream_client: Client,
+    dns: Arc<dns::RacingResolver>,
     work_changed: Notify,
     monitor_changed: Arc<Notify>,
     throttle_changed: Notify,
@@ -351,8 +365,9 @@ pub struct Engine {
     inner: Arc<Inner>,
 }
 
-fn client(raw: bool) -> Result<Client, String> {
+fn client(raw: bool, resolver: Arc<dns::RacingResolver>) -> Result<Client, String> {
     let builder = Client::builder()
+        .dns_resolver(resolver)
         .http1_only()
         .connect_timeout(Duration::from_secs(20))
         .pool_idle_timeout(Duration::from_secs(30))
@@ -551,6 +566,7 @@ impl Engine {
             }
         }
         let (events, _) = broadcast::channel(16);
+        let dns = Arc::new(dns::RacingResolver::new());
         let engine = Self {
             inner: Arc::new(Inner {
                 data_dir,
@@ -565,8 +581,9 @@ impl Engine {
                 }),
                 persist_lock: tokio::sync::Mutex::new(()),
                 events,
-                client: client(true)?,
-                stream_client: client(false)?,
+                client: client(true, dns.clone())?,
+                stream_client: client(false, dns.clone())?,
+                dns,
                 work_changed: Notify::new(),
                 monitor_changed: Arc::new(Notify::new()),
                 throttle_changed: Notify::new(),
@@ -613,12 +630,16 @@ impl Engine {
         let _ = self.inner.events.send(snapshot);
     }
     fn task(&self, id: &str) -> Result<Task, String> {
-        lock(&self.inner.state)
+        let task = lock(&self.inner.state)
             .tasks
             .iter()
             .find(|t| t.view.id == id)
             .cloned()
-            .ok_or_else(|| "Download no longer exists".into())
+            .ok_or_else(|| String::from("Download no longer exists"))?;
+        // Register only the origin actually requested by the download. Proxy
+        // hostnames, redirects, loopback and HTTP use normal DNS ordering.
+        self.inner.dns.remember_url(&task.view.url);
+        Ok(task)
     }
     // A transfer has ONE temporary file on the same volume as the final output.
     // Independent workers use separate file handles and disjoint absolute offsets.

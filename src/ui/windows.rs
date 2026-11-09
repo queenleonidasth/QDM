@@ -1800,7 +1800,7 @@ impl App {
                     return;
                 }
                 let mut settings: Settings = self.snapshot.settings.clone();
-                settings.connections = selected.unwrap_or(32);
+                settings.connections = selected.unwrap_or(8);
                 settings.max_concurrent = concurrent.unwrap_or(2);
                 settings.speed_limit_kib = speed;
                 settings.download_dir = directory;

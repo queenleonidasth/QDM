@@ -116,13 +116,21 @@ async function pauseAfter(context, id, targetBytes = 8 * MiB) {
   return task;
 }
 
+test('new-install-default-eight-connections', () => withFixture({
+  sizeBytes: 1024 * 1024,
+}, {}, async (context) => {
+  const snapshot = await context.client.snapshot();
+  assert.equal(snapshot.settings.connections, 8, 'New installations should default to eight workers');
+  assert.equal(snapshot.settings.shed_slow, true, 'Shed-slow is enabled by default');
+}));
+
 for (const connections of [32, 64]) {
   test(`tcp-${connections}-simultaneous-${connections === 64 ? 'no-validator' : 'etag'}`, () => withFixture({
     sizeBytes: 64 * MiB + 37, validators: connections === 64 ? 'none' : 'etag',
     barrierTarget: connections, delayMs: 3,
-  }, connections === 32 ? {} : { connections }, async (context) => {
+  }, { connections }, async (context) => {
     const snapshot = await context.client.snapshot();
-    assert.equal(snapshot.settings.connections, connections, 'Default must be 32 and selected maximum must permit 64');
+    assert.equal(snapshot.settings.connections, connections, 'Legacy 32 and maximum 64 must remain configurable');
     const id = await context.client.add({
       url: context.fixture.url, filename: `tcp-${connections}.bin`,
       ...(connections === 32 ? { expected_sha256: context.fixture.hash() } : {}),

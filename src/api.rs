@@ -29,6 +29,7 @@ pub struct QueueConfig {
 #[serde(default)]
 pub struct Settings {
     pub connections: u8,
+    pub shed_slow: bool,
     pub max_concurrent: u8,
     pub speed_limit_kib: u64,
     pub retries: u8,
@@ -41,7 +42,7 @@ pub struct Settings {
     pub queues: BTreeMap<String, QueueConfig>,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { connections: 32, max_concurrent: 2, speed_limit_kib: 0, retries: 3, download_dir: String::new(), close_to_tray: true, clipboard_suggestions: false, queue_speed_limits: BTreeMap::new(), queues: BTreeMap::new() } }
+    fn default() -> Self { Self { connections: 8, shed_slow: true, max_concurrent: 2, speed_limit_kib: 0, retries: 3, download_dir: String::new(), close_to_tray: true, clipboard_suggestions: false, queue_speed_limits: BTreeMap::new(), queues: BTreeMap::new() } }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
