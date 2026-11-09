@@ -1,6 +1,6 @@
 {
     "name":  "QDM - QUEEN Download Manager",
-    "version":  "0.4.2",
+    "version":  "0.4.3",
     "description":  "Native download manager integration with opt-in capture, browser session forwarding and safe fallback",
     "permissions":  [
                         "contextMenus",

@@ -7,7 +7,7 @@ import zipfile
 root = pathlib.Path(__file__).resolve().parents[1]
 source = root / "extensions" / "firefox"
 manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8-sig"))
-assert manifest["version"] == "0.4.2"
+assert manifest["version"] == "0.4.3"
 assert manifest["browser_specific_settings"]["gecko"]["id"] == "qdm@queen.local"
 assert set(manifest["permissions"]) == {
     "downloads", "contextMenus", "storage", "nativeMessaging", "cookies",
