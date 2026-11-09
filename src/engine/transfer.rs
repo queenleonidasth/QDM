@@ -29,7 +29,7 @@ const MAX_SHEDS_PER_PART: u8 = 2;
 const SHED_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
 // Tokio dispatches ordinary file writes to its blocking pool. Coalesce small
-// network frames without buffering a whole part/file: 16 MiB at 64 workers.
+// network frames without buffering a whole part/file: 32 MiB at 128 workers.
 const PART_BUFFER_BYTES: usize = 256 * 1024;
 type PartWriter = BufWriter<fs::File>;
 
@@ -793,8 +793,8 @@ impl Engine {
     async fn live_range_probe(&self, id: &str, stop: &mut Stop) -> Result<Option<Meta>, Fault> {
         let task = self.task(id).map_err(Fault::Fatal)?;
         let headers = request_headers(&task.headers).map_err(Fault::Fatal)?;
-        let mut response = network(stop, HEADER_TIMEOUT, self.inner.client.get(&task.view.url)
-            .headers(headers).header(RANGE, "bytes=0-0").send()).await?;
+        let future = { let guard = lock(&self.inner.client); guard.get(&task.view.url).headers(headers).header(RANGE, "bytes=0-0").send() };
+        let mut response = network(stop, HEADER_TIMEOUT, future).await?;
         if response.status().as_u16() != 206 || encoded(response.headers()) { return Ok(None); }
         let range = header_string(response.headers(), "content-range").as_deref().and_then(content_range);
         let Some(range) = range.filter(|r| r.start == 0 && r.end == 0 && r.total <= i64::MAX as u64) else { return Ok(None); };
@@ -1664,12 +1664,13 @@ impl Engine {
                 .map_err(disk)?;
         }
         let task = self.task(id).map_err(Fault::Fatal)?;
-        let mut request = self
-            .inner
-            .client
-            .get(&task.view.url)
-            .headers(request_headers(&task.headers).map_err(Fault::Fatal)?)
-            .header(RANGE, format!("bytes={wire_start}-{wire_end}"));
+        let mut request = {
+            let guard = lock(&self.inner.client);
+            guard
+                .get(&task.view.url)
+                .headers(request_headers(&task.headers).map_err(Fault::Fatal)?)
+                .header(RANGE, format!("bytes={wire_start}-{wire_end}"))
+        };
         if let Some(validator) = meta.validator.if_range() {
             request = request.header(IF_RANGE, validator);
         }
@@ -2068,17 +2069,11 @@ impl Engine {
         let headers = request_headers(&task.headers).map_err(Fault::Fatal)?;
         let started = Instant::now();
         trace_transfer("probe-send", || serde_json::json!({"task": id}));
-        let mut response = network(
-            stop,
-            HEADER_TIMEOUT,
-            self.inner
-                .client
-                .get(&task.view.url)
-                .headers(headers)
-                .header(RANGE, "bytes=0-0")
-                .send(),
-        )
-        .await?;
+        let future = {
+            let guard = lock(&self.inner.client);
+            guard.get(&task.view.url).headers(headers).header(RANGE, "bytes=0-0").send()
+        };
+        let mut response = network(stop, HEADER_TIMEOUT, future).await?;
         trace_headers(id, None, &response, started);
         if response.status().as_u16() == 416
             && header_string(response.headers(), "content-range").as_deref() == Some("bytes */0")
@@ -2154,16 +2149,8 @@ impl Engine {
         let task = self.task(id).map_err(Fault::Fatal)?;
         let mut headers = request_headers(&task.headers).map_err(Fault::Fatal)?;
         headers.remove(ACCEPT_ENCODING);
-        let response = network(
-            stop,
-            HEADER_TIMEOUT,
-            self.inner
-                .stream_client
-                .get(&task.view.url)
-                .headers(headers)
-                .send(),
-        )
-        .await?;
+        let future = { let guard = lock(&self.inner.stream_client); guard.get(&task.view.url).headers(headers).send() };
+        let response = network(stop, HEADER_TIMEOUT, future).await?;
         if let Some(reason) =
             not_a_file_reason(response.status().as_u16(), response.headers(), response.url().path())
         {
@@ -2272,12 +2259,69 @@ impl Engine {
             }
         }
     }
+    async fn run_ftp(&self, id: &str, stop: &mut Stop) -> Result<(), Fault> {
+        stop.check()?;
+        let task = self.task(id).map_err(Fault::Fatal)?;
+        let target = super::protocol::parse_ftp_url(&task.view.url).map_err(Fault::Fatal)?;
+        let part_path = self.part_path(id, 0);
+        if let Some(parent) = part_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Fault::Fatal(e.to_string()))?;
+        }
+        let resume_offset = tokio::fs::metadata(&part_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        // FTP has no server validator: a resume offset that exceeds a
+        // freshly reported SIZE is discarded by the RETR/REST path below, and
+        // the task restarts from zero to avoid splicing mixed generations.
+        let (received, total_opt) = super::ftp::download_ftp(&target, &part_path, resume_offset)
+            .await
+            .map_err(Fault::Fatal)?;
+        let total = total_opt.unwrap_or(resume_offset + received);
+        {
+            let mut state = lock(&self.inner.state);
+            let task = state
+                .tasks
+                .iter_mut()
+                .find(|t| t.view.id == id)
+                .ok_or_else(|| Fault::Fatal("Download no longer exists".into()))?;
+            task.view.total_bytes = Some(total);
+            task.view.supports_ranges = false;
+            task.view.resumable = resume_offset > 0 || total_opt.is_some();
+            task.view.network_bytes = resume_offset + received;
+            task.stream_mode = true;
+            task.parts = vec![super::Part {
+                id: 0,
+                start: 0,
+                end: total,
+                downloaded: total,
+                durable: total,
+                ..Default::default()
+            }];
+            task.view.status = "downloading".into();
+            task.view.notice = Some("FTP stream complete, verifying file...".into());
+            task.refresh();
+        }
+        self.changed();
+        self.emit();
+        self.finalize(id, stop).await
+    }
+
     async fn run_download(&self, id: &str, task_stop: watch::Receiver<bool>) -> Result<(), Fault> {
         let (_group_hold, group) = watch::channel(false);
         let mut stop = Stop {
             task: task_stop.clone(),
             group,
         };
+        if self
+            .task(id)
+            .map(|t| t.view.url.starts_with("ftp://"))
+            .unwrap_or(false)
+        {
+            return self.run_ftp(id, &mut stop).await;
+        }
         let probe = match self.probe(id, &mut stop).await {
             Err(Fault::Restart(reason)) => {
                 self.clean_parts(id, Some(&reason)).await?;
@@ -2535,12 +2579,13 @@ impl Engine {
             let result = async {
                 self.wait_for_origin(id, stop).await?;
                 let task = self.task(id).map_err(Fault::Fatal)?;
-                let mut request = self
-                    .inner
-                    .client
-                    .get(&task.view.url)
-                    .headers(request_headers(&task.headers).map_err(Fault::Fatal)?)
-                    .header(RANGE, format!("bytes={start}-{end}"));
+                let mut request = {
+                    let guard = lock(&self.inner.client);
+                    guard
+                        .get(&task.view.url)
+                        .headers(request_headers(&task.headers).map_err(Fault::Fatal)?)
+                        .header(RANGE, format!("bytes={start}-{end}"))
+                };
                 if let Some(validator) = meta.validator.if_range() {
                     request = request.header(IF_RANGE, validator);
                 }

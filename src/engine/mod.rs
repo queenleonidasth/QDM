@@ -2,6 +2,7 @@
 //! Request overlap is checked before appending and again across piece boundaries.
 pub(crate) mod protocol;
 mod dns;
+mod ftp;
 mod transfer;
 mod store;
 
@@ -211,7 +212,7 @@ impl Task {
             self.view.downloaded_bytes = self.parts.iter().map(|p| p.downloaded).sum();
         }
         self.view.part_count = self.parts.len() as u32;
-        self.view.connections_active = self.parts.iter().filter(|p| p.active).count().min(64) as u8;
+        self.view.connections_active = self.parts.iter().filter(|p| p.active).count().min(128) as u8;
         self.view.peak_connections = self.view.peak_connections.max(self.view.connections_active);
         self.view.segments = self
             .parts
@@ -224,7 +225,7 @@ impl Task {
                 active: p.active,
             })
             .collect();
-        let limit = if self.stream_mode { 1 } else { self.view.connections_limit.clamp(1, 64) as usize };
+        let limit = if self.stream_mode { 1 } else { self.view.connections_limit.clamp(1, 128) as usize };
         if !self.lane_activity.is_empty() {
             self.view.lanes = (0..limit).map(|index| {
                 let slot = self.lane_activity.get(index).cloned().unwrap_or_default();
@@ -239,7 +240,7 @@ impl Task {
             }).collect();
         } else if !self.parts.is_empty() {
             // Legacy jobs can contain hundreds of dynamically split CHUNKS.
-            // Group their already-saved bytes into <=64 display buckets.
+            // Group their already-saved bytes into <=128 display buckets.
             // This is explicitly marked approximate, not historical connections.
             let mut lanes: Vec<LaneView> = (0..limit).map(|n| LaneView { id: (n + 1) as u8, ..LaneView::default() }).collect();
             for part in &self.parts {
@@ -349,8 +350,8 @@ struct Inner {
     state: Mutex<State>,
     persist_lock: tokio::sync::Mutex<()>,
     events: broadcast::Sender<Snapshot>,
-    client: Client,
-    stream_client: Client,
+    client: Mutex<Client>,
+    stream_client: Mutex<Client>,
     dns: Arc<dns::RacingResolver>,
     work_changed: Notify,
     monitor_changed: Arc<Notify>,
@@ -366,12 +367,21 @@ pub struct Engine {
 }
 
 fn client(raw: bool, resolver: Arc<dns::RacingResolver>) -> Result<Client, String> {
+    client_with_proxy(raw, resolver, "", "")
+}
+
+fn client_with_proxy(
+    raw: bool,
+    resolver: Arc<dns::RacingResolver>,
+    http_proxy: &str,
+    no_proxy: &str,
+) -> Result<Client, String> {
     let builder = Client::builder()
         .dns_resolver(resolver)
         .http1_only()
         .connect_timeout(Duration::from_secs(20))
         .pool_idle_timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(64)
+        .pool_max_idle_per_host(128)
         .tcp_keepalive(Duration::from_secs(30))
         .user_agent(concat!("QDM/", env!("CARGO_PKG_VERSION")))
         .referer(false)
@@ -401,6 +411,17 @@ fn client(raw: bool, resolver: Arc<dns::RacingResolver>) -> Result<Client, Strin
     } else {
         builder
     };
+    let builder = if http_proxy == "none" {
+        builder.no_proxy()
+    } else if http_proxy.is_empty() {
+        builder
+    } else {
+        let mut proxy = reqwest::Proxy::all(http_proxy).map_err(|e| e.to_string())?;
+        if !no_proxy.is_empty() {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+        }
+        builder.proxy(proxy)
+    };
     builder.build().map_err(|e| e.to_string())
 }
 
@@ -422,7 +443,7 @@ fn select_launches(candidates: Vec<LaunchCandidate>, count: usize) -> Vec<String
 }
 
 fn validated_settings(mut settings: Settings, fallback: &Path) -> Result<Settings, String> {
-    settings.connections = settings.connections.clamp(1, 64);
+    settings.connections = settings.connections.clamp(1, 128);
     settings.max_concurrent = settings.max_concurrent.clamp(1, 8);
     settings.retries = settings.retries.min(8);
     settings.speed_limit_kib = settings.speed_limit_kib.min(MAX_SPEED_LIMIT_KIB);
@@ -462,6 +483,26 @@ fn validated_settings(mut settings: Settings, fallback: &Path) -> Result<Setting
     if !Path::new(&settings.download_dir).is_absolute() {
         return Err("Choose an absolute download folder".into());
     }
+    settings.http_proxy = settings.http_proxy.trim().to_owned();
+    if !settings.http_proxy.is_empty() && settings.http_proxy != "none" {
+        if let Err(_) = url::Url::parse(&settings.http_proxy) {
+            return Err("HTTP proxy must be a valid http(s) URL, empty (system), or \"none\" (direct)".into());
+        }
+        let parsed = url::Url::parse(&settings.http_proxy).expect("validated above");
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("HTTP proxy must use http or https".into());
+        }
+    }
+    if settings.no_proxy.len() > 4096 {
+        return Err("Proxy exception list is too long".into());
+    }
+    settings.no_proxy = settings
+        .no_proxy
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
     Ok(settings)
 }
 
@@ -567,6 +608,8 @@ impl Engine {
         }
         let (events, _) = broadcast::channel(16);
         let dns = Arc::new(dns::RacingResolver::new());
+        let rate_client = client_with_proxy(true, dns.clone(), &settings.http_proxy, &settings.no_proxy)?;
+        let streamed_client = client_with_proxy(false, dns.clone(), &settings.http_proxy, &settings.no_proxy)?;
         let engine = Self {
             inner: Arc::new(Inner {
                 data_dir,
@@ -581,8 +624,8 @@ impl Engine {
                 }),
                 persist_lock: tokio::sync::Mutex::new(()),
                 events,
-                client: client(true, dns.clone())?,
-                stream_client: client(false, dns.clone())?,
+                client: Mutex::new(rate_client),
+                stream_client: Mutex::new(streamed_client),
                 dns,
                 work_changed: Notify::new(),
                 monitor_changed: Arc::new(Notify::new()),
@@ -996,6 +1039,15 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         {
             let mut state = lock(&self.inner.state);
+            let proxy_changed = state.settings.http_proxy != settings.http_proxy
+                || state.settings.no_proxy != settings.no_proxy;
+            if proxy_changed {
+                let dns = self.inner.dns.clone();
+                let rate = client_with_proxy(true, dns.clone(), &settings.http_proxy, &settings.no_proxy)?;
+                let streamed = client_with_proxy(false, dns, &settings.http_proxy, &settings.no_proxy)?;
+                *lock(&self.inner.client) = rate;
+                *lock(&self.inner.stream_client) = streamed;
+            }
             let global_limit_changed = state.settings.speed_limit_kib != settings.speed_limit_kib;
             let changed_queues: Vec<_> = state.settings.queue_speed_limits.keys()
                 .chain(settings.queue_speed_limits.keys())
@@ -1290,6 +1342,28 @@ mod queue_tests {
         ], 3);
         assert_eq!(picks, vec!["hi2".to_string(), "hi1".to_string(), "low2".to_string()]);
         assert!(select_launches(vec![cand("x", 0, 1)], 0).is_empty());
+    }
+
+    #[test]
+    fn validated_settings_allows_128_connections_and_proxy_parity() {
+        let mut settings = Settings::default();
+        settings.download_dir = "C:\\downloads".into();
+        settings.connections = 128;
+        settings.http_proxy = "http://127.0.0.1:8080".into();
+        settings.no_proxy = " localhost , .local ,,".into();
+        let validated = validated_settings(settings, Path::new("C:\\fallback")).unwrap();
+        assert_eq!(validated.connections, 128);
+        assert_eq!(validated.http_proxy, "http://127.0.0.1:8080");
+        assert_eq!(validated.no_proxy, "localhost,.local");
+        // Backward-compatible legacy settings without proxy fields default to system proxy.
+        let legacy: Settings = serde_json::from_str(r#"{"connections":64}"#).unwrap();
+        assert_eq!(legacy.http_proxy, "");
+        assert_eq!(legacy.no_proxy, "");
+        // Invalid proxy URLs are rejected.
+        let mut bad = Settings::default();
+        bad.download_dir = "C:\\tmp".into();
+        bad.http_proxy = "not-a-url".into();
+        assert!(validated_settings(bad, Path::new("C:\\fallback")).is_err());
     }
 
     #[tokio::test]

@@ -503,6 +503,8 @@ export component QdmWindow inherits Window {
     in-out property <string> setting-queue-config;
     in-out property <bool> setting-tray: true;
     in-out property <bool> setting-clipboard: false;
+    in-out property <string> setting-http-proxy;
+    in-out property <string> setting-no-proxy;
     in property <bool> clipboard-visible: false;
     in property <string> clipboard-url;
     in property <string> clipboard-name;
@@ -875,9 +877,9 @@ export component QdmWindow inherits Window {
                 settings-scroll := ScrollView {
                     min-height: 100px; vertical-stretch: 1;
                     content-width: self.visible-width;
-                    content-height: max(self.visible-height, 730px);
+                    content-height: max(self.visible-height, 840px);
                      Rectangle {
-                         x: 0px; y: 0px; width: settings-scroll.visible-width; height: 730px;
+                         x: 0px; y: 0px; width: settings-scroll.visible-width; height: 840px;
                         Text { x: 0px; y: 0px; width: parent.width; height: 13px; text: "TRANSFER ENGINE"; color: Theme.gold; font-size: 12px; letter-spacing: 1.3px; }
                         HorizontalLayout {
                             x: 0px; y: 26px; width: parent.width; height: 78px; spacing: 14px;
@@ -885,7 +887,7 @@ export component QdmWindow inherits Window {
                                 spacing: 7px;
                                 Text { text: "Connections per file"; color: Theme.muted; font-size: 13px; }
                                 settings-first := TextField { height: 40px; text <=> root.setting-connections; label: "Connections"; }
-                                Text { text: "1–64 workers"; color: Theme.faint; font-size: 12px; }
+                                Text { text: "1–128 workers"; color: Theme.faint; font-size: 12px; }
                             }
                             VerticalLayout {
                                 spacing: 7px;
@@ -923,6 +925,9 @@ export component QdmWindow inherits Window {
                          Text { x: 0px; y: 590px; width: parent.width; height: 14px; text: "QUEUES · one per line: name|priority|folder"; color: Theme.gold; font-size: 12px; letter-spacing: 0.8px; }
                          TextEdit { x: 0px; y: 612px; width: parent.width; height: 70px; text <=> root.setting-queue-config; accessible-label: "Queue configuration"; font-size: 12px; wrap: word-wrap; }
                          Text { x: 0px; y: 684px; width: parent.width; height: 34px; text: "Higher priority starts first · folder is a per-queue category (absolute path) · blank fields use defaults · pause or resume a queue in Download Details"; color: Theme.faint; font-size: 11px; wrap: word-wrap; }
+                         Text { x: 0px; y: 722px; width: parent.width; height: 14px; text: "PROXY · empty = system · none = direct"; color: Theme.gold; font-size: 12px; letter-spacing: 0.8px; }
+                         TextField { x: 0px; y: 742px; width: parent.width; height: 40px; text <=> root.setting-http-proxy; label: "HTTP proxy"; }
+                         TextField { x: 0px; y: 790px; width: parent.width; height: 40px; text <=> root.setting-no-proxy; label: "No proxy"; }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.edge; }

@@ -24,7 +24,7 @@ async function testCase(mode, pauseDuringCooldown) {
   const retryAfterSeconds = mode === '429' && !pauseDuringCooldown ? 8 : 2;
   result.retryAfterSeconds = mode === '429' ? retryAfterSeconds : null;
   const sockets = new Set(), active = new Map(), timers = new Set();
-  let nextSocket = 0, nextRequest = 0, firstPressureAt = null, peakSockets = 0, client;
+  let nextSocket = 0, nextRequest = 0, firstPressureAt = null, firstPressureId = null, peakSockets = 0, client;
   const schedule = (fn, milliseconds) => { const timer = setTimeout(() => { timers.delete(timer); fn(); }, milliseconds); timers.add(timer); return timer; };
   const server = http.createServer((request, response) => {
     const match = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range || '');
@@ -37,6 +37,7 @@ async function testCase(mode, pauseDuringCooldown) {
     result.requests.push(record);
     if (body && active.size >= 2) {
       firstPressureAt ??= Date.now();
+      firstPressureId ??= record.id;
       if (mode === '429') {
         record.status = 429;
         response.writeHead(429, { 'Retry-After': String(retryAfterSeconds), 'Content-Length': '0' }); response.end();
@@ -75,11 +76,11 @@ async function testCase(mode, pauseDuringCooldown) {
     const id = await client.add({ url: `http://127.0.0.1:${server.address().port}/limited.bin`,
       filename: `${mode}-${pauseDuringCooldown ? 'pause' : 'continue'}.bin`, expected_sha256: expected });
     await waitFor(() => firstPressureAt !== null, 'origin rejects an attempted growth above two sockets', 15000);
-    const original = result.requests.filter(r => r.body && r.status === 206 && r.at < firstPressureAt);
+    const original = result.requests.filter(r => r.body && r.status === 206 && r.id < firstPressureId);
     assert.equal(original.length, 2, 'Startup must begin with two accepted body streams');
     assert.ok(original.every(r => r.end - r.start + 1 >= 15 * MiB), 'Startup did not retain large initial ranges');
     const firstAt = original[0].at;
-    assert.equal(result.requests.filter(r => r.body && r.at < firstAt + 75).length, 2, 'The initial request wave exceeded two streams');
+    assert.equal(result.requests.filter(r => r.body && r.status === 206 && r.at < firstAt + 75).length, 2, 'The initial request wave exceeded two streams');
     await delay(300);
     assert.ok(original.every(r => r.closedAt === null), 'An accepted stream was canceled immediately after origin pressure');
     assert.ok(original.reduce((sum, r) => sum + r.sentAfterPressure, 0) >= 128 * KiB,

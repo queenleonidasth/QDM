@@ -40,9 +40,14 @@ pub struct Settings {
     pub clipboard_suggestions: bool,
     pub queue_speed_limits: BTreeMap<String, u64>,
     pub queues: BTreeMap<String, QueueConfig>,
+    /// Explicit proxy URL (http/https). Empty means use system proxy,
+    /// `"none"` means direct connections. Mirrors IDM's `UseHttpProxy`.
+    pub http_proxy: String,
+    /// Comma-separated hosts that bypass the above proxy (IDM `ExceptionServers` parity).
+    pub no_proxy: String,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { connections: 8, shed_slow: true, max_concurrent: 2, speed_limit_kib: 0, retries: 3, download_dir: String::new(), close_to_tray: true, clipboard_suggestions: false, queue_speed_limits: BTreeMap::new(), queues: BTreeMap::new() } }
+    fn default() -> Self { Self { connections: 8, shed_slow: true, max_concurrent: 2, speed_limit_kib: 0, retries: 3, download_dir: String::new(), close_to_tray: true, clipboard_suggestions: false, queue_speed_limits: BTreeMap::new(), queues: BTreeMap::new(), http_proxy: String::new(), no_proxy: String::new() } }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -124,7 +129,7 @@ pub struct TaskView {
     pub connections_limit: u8,
     /// Raw chunks retained for resume and diagnostics; can exceed 64.
     pub segments: Vec<SegmentView>,
-    /// Actual connection worker slots, always capped by configured connections (<=64).
+    /// Actual connection worker slots, always capped by configured connections (<=128).
     pub lanes: Vec<LaneView>,
     pub part_count: u32,
     pub lane_history_estimated: bool,

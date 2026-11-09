@@ -1783,8 +1783,8 @@ impl App {
                 let concurrent = get_text(fields.concurrent).trim().parse::<u8>();
                 let speed = get_text(fields.speed).trim().parse::<u64>();
                 let directory = get_text(fields.directory).trim().to_string();
-                if !selected.as_ref().is_ok_and(|n| (1..=64).contains(n)) {
-                    self.error("เลือกจำนวนการเชื่อมต่อระหว่าง 1–64");
+                if !selected.as_ref().is_ok_and(|n| (1..=128).contains(n)) {
+                    self.error("เลือกจำนวนการเชื่อมต่อระหว่าง 1–128");
                     return;
                 }
                 if !concurrent.as_ref().is_ok_and(|n| (1..=8).contains(n)) {

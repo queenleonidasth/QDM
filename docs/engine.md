@@ -4,7 +4,7 @@ The engine is an original Rust implementation in [`src/engine`](../src/engine). 
 
 ## Connections and dynamic segmentation
 
-The default is **32 connections per download**, configurable from **1 to 64**. The client uses HTTP/1.1 so concurrent requests can occupy separate TCP connections. A one-byte GET probe establishes whether the origin actually honors Range; an `Accept-Ranges` header alone is insufficient.
+The default is **32 connections per download**, configurable from **1 to 128**. The client uses HTTP/1.1 so concurrent requests can occupy separate TCP connections. A one-byte GET probe establishes whether the origin actually honors Range; an `Accept-Ranges` header alone is insufficient.
 
 Initial pieces have exclusive end offsets and a minimum target size of 64 KiB. Smaller files therefore use fewer connections. When a worker becomes available, it can divide the remaining tail of an active piece. The original worker's in-flight disk-write reservation is excluded from the stolen tail. Each piece has one writer and its own part file; workers never share ownership of output bytes. A task is capped at 4,096 pieces to bound bookkeeping and file proliferation.
 
@@ -44,7 +44,7 @@ Request headers such as browser credentials remain in memory and are not written
 
 The queue defaults to two simultaneous downloads and supports one to eight. The KiB/s limit is shared across active downloads. Pausing a transfer releases future bandwidth reservations so they do not delay the next task. The engine sends progress updates approximately twice a second during active work. With no active work it waits for a command, checkpoint deadline, or scheduled start; it does not poll an empty queue continuously.
 
-This implementation covers the requested **HTTP/HTTPS download core**. It does not claim universal compatibility with every origin, protected-media workflow, or all ancillary IDM features. Partial data and final assembly temporarily require additional disk space; assembly is a streaming copy rather than an in-place concatenation.
+This implementation covers the **HTTP/HTTPS + FTP download core**. FTP is passive, binary, single-stream with `REST` resume and the same `.partial` + SHA-256 finalize as HTTP; it starts as `stream_mode` and never splits ranges. It does not claim universal compatibility with every origin, protected-media workflow, or all ancillary IDM features. Partial data and final assembly temporarily require additional disk space; assembly is a streaming copy rather than an in-place concatenation. Explicit `http_proxy`/`no_proxy` settings (Slint Preferences) mirror the old IDM `UseHttpProxy`/`ExceptionServers` keys; they are applied when HTTP clients are built at `Engine::open` and need a restart to take effect.
 
 ## Verification
 

@@ -37,13 +37,13 @@ function Assert-QdmReleaseGates {
   }
 
   $qdmRecord=Read-QdmGate 'engine-acceptance.json' -RequireAfterHash
-  Assert-QdmGateCases $qdmRecord 'engine-acceptance.json' 40 -RequireCounters
+  Assert-QdmGateCases $qdmRecord 'engine-acceptance.json' 41 -RequireCounters
   if($qdmRecord.binaryUnchangedDuringRun -isnot [bool] -or !$qdmRecord.binaryUnchangedDuringRun){throw 'Engine acceptance did not certify an unchanged executable.'}
   if(@($qdmRecord.cases | Where-Object {$_.name -ceq 'resume-validation-is-visible-and-pause-all-keeps-one-owner'}).Count -ne 1){throw 'Engine acceptance is missing the resume-validation ownership regression.'}
   foreach($qdmRateCase in @('per-download-speed-limit-is-enforced','queue-speed-limit-is-shared-across-concurrent-transfers','default-queue-limit-applies-to-unassigned-downloads','changing-an-active-per-download-limit-takes-effect-without-restart','pausing-one-queue-member-does-not-starve-another')){
     if(@($qdmRecord.cases | Where-Object {$_.name -ceq $qdmRateCase}).Count -ne 1){throw ('Missing rate limit regression: '+$qdmRateCase)}
   }
-  Add-QdmVerifiedGate 'engine-acceptance.json' 40
+  Add-QdmVerifiedGate 'engine-acceptance.json' 41
 
   $qdmRecord=Read-QdmGate 'bridge.json'
   Assert-QdmGateCases $qdmRecord 'bridge.json' 18 -RequireCounters

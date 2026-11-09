@@ -791,7 +791,7 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
         ui.set_stage_progress(assembly);
         ui.set_stage_bytes(if task.assembly_total_bytes == 0 { "Checking saved data".into() }
             else { format!("{:.1}% · {} / {}", assembly * 100., human(task.assembly_bytes), human(task.assembly_total_bytes)).into() });
-        ui.set_lane_summary(format!("{} workers · {} receiving", task.lanes.len().min(64), task.connections_active).into());
+        ui.set_lane_summary(format!("{} workers · {} receiving", task.lanes.len().min(128), task.connections_active).into());
         ui.set_lane_note(if task.lane_history_estimated {
             "Historical grouping: previous worker identity is estimated. Percent shows each assigned piece.".into()
         } else {
@@ -903,7 +903,7 @@ fn parse_queue_configs(value: &str) -> Result<BTreeMap<String, QueueConfig>, Str
 }
 fn settings_from(ui: &QdmWindow, base: &Settings) -> Result<Settings, String> {
     let mut settings = base.clone();
-    settings.connections = ui.get_setting_connections().trim().parse::<u8>().ok().filter(|n| (1..=64).contains(n)).ok_or("Connections must be a whole number from 1 to 64.")?;
+    settings.connections = ui.get_setting_connections().trim().parse::<u8>().ok().filter(|n| (1..=128).contains(n)).ok_or("Connections must be a whole number from 1 to 128.")?;
     settings.shed_slow = ui.get_setting_shed_slow();
     settings.max_concurrent = ui.get_setting_concurrent().trim().parse::<u8>().ok().filter(|n| (1..=8).contains(n)).ok_or("Concurrent downloads must be a whole number from 1 to 8.")?;
     settings.speed_limit_kib = ui.get_setting_speed().trim().parse::<u64>().map_err(|_| "Speed limit must be a non-negative whole number.")?;
@@ -923,6 +923,14 @@ fn settings_from(ui: &QdmWindow, base: &Settings) -> Result<Settings, String> {
     }
     settings.queues = parsed_queues;
     if !Path::new(&settings.download_dir).is_absolute() { return Err("The download folder must be an absolute Windows path.".into()); }
+    settings.http_proxy = ui.get_setting_http_proxy().trim().into();
+    settings.no_proxy = ui.get_setting_no_proxy().trim().into();
+    if !settings.http_proxy.is_empty() && settings.http_proxy != "none" {
+        let parsed = url::Url::parse(&settings.http_proxy).map_err(|_| "HTTP proxy must be a valid http(s) URL, empty (system), or \"none\" (direct)".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("HTTP proxy must use http or https".into());
+        }
+    }
     settings.close_to_tray = ui.get_setting_tray();
     settings.clipboard_suggestions = ui.get_setting_clipboard();
     Ok(settings)
@@ -1340,7 +1348,7 @@ pub fn run(command_tx: Sender<Command>, event_rx: Receiver<UiEvent>, data: &Path
            ui.set_setting_retries(settings.retries.to_string().into());
            ui.set_setting_queue_limits(settings.queue_speed_limits.iter().map(|(name, limit)| format!("{name}={limit}")).collect::<Vec<_>>().join("\n").into());
            ui.set_setting_queue_config(settings.queues.iter().map(|(name, queue)| format!("{}|{}|{}", name, queue.priority, queue.category_dir)).collect::<Vec<_>>().join("\n").into());
-           ui.set_setting_directory(settings.download_dir.into());
+           ui.set_setting_directory(settings.download_dir.into()); ui.set_setting_http_proxy(settings.http_proxy.into()); ui.set_setting_no_proxy(settings.no_proxy.into());
           ui.set_setting_tray(settings.close_to_tray); ui.set_setting_clipboard(settings.clipboard_suggestions); ui.set_settings_open(true);
       }); }
     { let weak = ui.as_weak(); let state = state.clone(); let tx = command_tx.clone(); let slide = slide.clone(); let morph = morph.clone();

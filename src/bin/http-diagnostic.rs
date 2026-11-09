@@ -63,7 +63,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let url = option(&args,"--url","");
     if !url.starts_with("https://") && !url.starts_with("http://") { eprintln!("Pass --url HTTP(S)_URL [--connections1|4|32] [--range-bytes1048576] [--no-proxy] [--http-versionauto] [--ipv4]");std::process::exit(2); }
-    let connections = option(&args,"--connections","32").parse::<usize>().unwrap().clamp(1,64);
+    let connections = option(&args,"--connections","32").parse::<usize>().unwrap().clamp(1,128);
     let range_bytes = option(&args,"--range-bytes","1048576").parse::<u64>().unwrap().clamp(1,4*1024*1024);
     let no_proxy = args.iter().any(|arg| arg=="--no-proxy");
     let ipv4 = args.iter().any(|arg| arg=="--ipv4");

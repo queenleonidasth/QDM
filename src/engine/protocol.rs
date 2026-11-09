@@ -18,9 +18,16 @@ pub fn validate_url(raw: &str) -> Result<String, String> {
     if raw.len() > 32768 {
         return Err("Download URL is too long".into());
     }
-    let mut url = Url::parse(raw.trim()).map_err(|_| "Enter a valid HTTP or HTTPS URL")?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("QDM supports HTTP and HTTPS URLs".into());
+    let mut url = Url::parse(raw.trim()).map_err(|_| "Enter a valid HTTP, HTTPS or FTP URL")?;
+    if url.host_str().is_none() {
+        return Err("QDM supports HTTP, HTTPS and FTP URLs".into());
+    }
+    if url.scheme() == "ftp" {
+        url.set_fragment(None);
+        return Ok(url.to_string());
+    }
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("QDM supports HTTP, HTTPS and FTP URLs".into());
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(
@@ -32,6 +39,34 @@ pub fn validate_url(raw: &str) -> Result<String, String> {
     }
     url.set_fragment(None);
     Ok(url.to_string())
+}
+
+/// FTP endpoints are single-stream (no byte ranges). Passive mode with
+/// `REST` resume is supported; credentials may live in the URL
+/// (`ftp://user:pass@host/path`) or default to anonymous.
+pub struct FtpTarget {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub path: String,
+}
+
+pub fn parse_ftp_url(raw: &str) -> Result<FtpTarget, String> {
+    let url = Url::parse(raw.trim()).map_err(|_| "Enter a valid FTP URL")?;
+    if url.scheme() != "ftp" {
+        return Err("Only ftp:// URLs use the FTP engine".into());
+    }
+    let host = url.host_str().ok_or("FTP URL needs a host")?.to_owned();
+    let port = url.port_or_known_default().unwrap_or(21);
+    let username = if url.username().is_empty() {
+        "anonymous".to_owned()
+    } else {
+        url.username().to_owned()
+    };
+    let password = url.password().map(str::to_owned).unwrap_or_else(|| "anonymous@".into());
+    let path = if url.path().is_empty() { "/".to_owned() } else { url.path().to_owned() };
+    Ok(FtpTarget { host, port, username, password, path })
 }
 
 pub fn request_headers(values: &BTreeMap<String, String>) -> Result<HeaderMap, String> {

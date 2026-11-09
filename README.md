@@ -19,7 +19,7 @@ Use **Add multiple downloads** in Preferences to enter one URL per line. You can
 
 ## Preferences and limits
 
-Preferences include the per-file connection ceiling (1–64, default 32), concurrent download count (1–8), global speed limit, retry attempts, download folder, close-to-tray behavior, and reduced motion.
+Preferences include the per-file connection ceiling (1–128, default 32), concurrent download count (1–8), global speed limit, retry attempts, download folder, close-to-tray behavior, and reduced motion.
 
 Speed limits use KiB/s; zero means unlimited. The multi-download form and each download's **Details** sheet also support a per-download limit and queue name. In Preferences, enter queue limits one per line, for example:
 
@@ -80,3 +80,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\slint-ui-acceptance.ps
 Run Rust commands in a Visual Studio Developer Command Prompt when the Windows SDK tools are not already on `PATH`. These commands describe testing steps; they do not certify a release. Verify the complete release-gate evidence and executable SHA-256 before distribution. The engine also exposes a JSON `--cli` mode; the desktop UI in this build requires Windows.
 
 FTP, site grabbing, universal video extraction, DRM support, and site-specific account systems are not verified features. See [third-party notices](docs/third-party/README.md) for dependency licenses.
+
+## FTP and proxy settings
+
+QDM accepts `ftp://` URLs: passive mode, binary transfer (`TYPE I`), `SIZE`, `REST` resume and single-stream `RETR` with the same `.partial` + SHA-256 finalize flow as HTTP. Credentials may be embedded (`ftp://user:pass@host/path`) or default to anonymous. FTP has no byte-range parallelism; it uses one stream with durable resume checkpoints.
+
+Preferences include an HTTP proxy (`setting-http-proxy`) and no-proxy list (`setting-no-proxy`): empty uses the system proxy, `none` forces direct connections, otherwise an `http://host:port` URL is used and listed hosts bypass it. Proxy changes take effect at the next QDM start because HTTP clients are built once at `Engine::open`.
