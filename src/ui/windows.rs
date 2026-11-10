@@ -1534,7 +1534,7 @@ impl App {
             1302,
         );
         self.place(connections, 300, 17, 270, 220);
-        let mut values = vec![1u8, 4, 8, 16, 32, 64];
+        let mut values = vec![1u8, 4, 8, 16, 32, 64, 128];
         if !values.contains(&s.connections) {
             values.push(s.connections);
             values.sort_unstable();

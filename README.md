@@ -32,7 +32,7 @@ media=256
 
 ## Connections, resume, and integrity
 
-The connection setting is a ceiling, not a speed guarantee. QDM starts with fewer workers and can add connections as data arrives. It adapts to server restrictions such as HTTP 429 responses, and may split eligible remaining ranges between workers. A worker can receive more than one piece; piece identifiers can therefore exceed 64 without exceeding the worker ceiling.
+The connection setting is a ceiling, not a speed guarantee. QDM starts with fewer workers and can add connections as data arrives. It adapts to server restrictions such as HTTP 429 responses, and may split eligible remaining ranges between workers. A worker can receive more than one piece; piece identifiers can therefore exceed the number of worker slots without exceeding the worker ceiling.
 
 QDM checks server validators and overlapping data before reusing saved progress. Servers without range support use a single stream, which may restart from the beginning after a pause. Sampled overlaps cannot prove that every unsampled byte is unchanged. QDM calculates a SHA-256 for completed files; only a comparison against a trusted expected hash independently verifies the result.
 

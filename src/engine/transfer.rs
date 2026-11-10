@@ -634,7 +634,7 @@ impl Engine {
                 owner_lane: Some(0),
                 ..Part::default()
             }];
-            task.lane_activity = vec![LaneRecord::default(); 64];
+            task.lane_activity = vec![LaneRecord::default(); super::MAX_WORKERS];
             task.lane_activity[0] = LaneRecord {
                 current_total: total.unwrap_or(0),
                 current_part_id: Some(1),
@@ -825,7 +825,7 @@ impl Engine {
                         part.active = false; part.owner_lane = None; part.reserved = 0;
                         part.response_end = 0; part.request_started_at = None;
                         part.response_started_at = None; part.response_payload_bytes = 0;
-                        task.lane_activity = vec![LaneRecord::default(); 64];
+                        task.lane_activity = vec![LaneRecord::default(); super::MAX_WORKERS];
                         task.stream_mode = false; task.view.supports_ranges = true;
                         task.view.resumable = true; task.view.total_bytes = Some(meta.total);
                         task.validator = meta.validator.clone(); task.resource_url = Some(meta.url.clone());
@@ -1230,7 +1230,7 @@ impl Engine {
         let mut workers = JoinSet::new();
         // Idle tasks wait on Notify and hold neither a file nor a socket. This
         // allows increasing the limit live without a polling loop or restart.
-        for slot in 0..64u8 {
+        for slot in 0..super::MAX_WORKERS as u8 {
             let engine = self.clone();
             let id = id.to_string();
             let meta = meta.clone();
@@ -1395,7 +1395,7 @@ impl Engine {
             let sample = setup.as_micros().min(u64::MAX as u128) as u64;
             task.request_setup_micros = if task.request_setup_micros == 0 { sample.max(1000) }
                 else { task.request_setup_micros.saturating_mul(3).saturating_add(sample.max(1000)) / 4 };
-            task.startup_ready_slots |= 1u64 << slot;
+            task.startup_ready_slots |= 1u128 << slot;
             if !task.adaptive_starting || task.adaptive_limit >= configured { return; }
             // A fast, low-latency origin (first byte well under ~50 ms) has
             // already proven it accepts a connection cheaply: reach the

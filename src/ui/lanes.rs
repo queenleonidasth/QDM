@@ -125,7 +125,7 @@ unsafe fn render(hwnd: HWND, pane: &LaneGrid) {
             &format!("{} / {}",human(t.downloaded_bytes),
                 t.total_bytes.map(human).unwrap_or_else(||"?".into())),muted,true);
         // Always-visible overview of worker slots, NEVER the dynamic part list.
-        let n=t.lanes.len().min(64);
+        let n=t.lanes.len().min(128);
         let per_row=32usize;
         for i in 0..n {
             let row=(i/per_row) as i32;
@@ -140,6 +140,7 @@ unsafe fn render(hwnd: HWND, pane: &LaneGrid) {
             let done=(progress*tile as f64).round() as i32;
             fill(dc,left,top,done,6,if lane.active {green}else{saved});
         }
+        let legend_top=29+((n.max(1) as i32+per_row as i32-1)/per_row as i32)*10+2;
         if t.status == "assembling" {
             let progress=segment_percent(t.assembly_bytes,t.assembly_total_bytes);
             // Physical merging progress, independent of network download at 100%.
@@ -152,11 +153,11 @@ unsafe fn render(hwnd: HWND, pane: &LaneGrid) {
             fill(dc,11,47,((width-22) as f64*progress).round() as i32,10,green);
         } else {
             let legend = if t.lane_history_estimated {
-                "Older chunks grouped into 64 lanes for display; historical workers unknown"
+                "Older chunks grouped into 128 lanes for display; historical workers unknown"
             } else {
-                "GREEN = downloaded by each connection  |  bright = receiving  |  scroll to lane #64"
+                "GREEN = downloaded by each connection  |  bright = receiving  |  scroll to lane #128"
             };
-            label(dc,11,49,width-22,13,legend,muted,false);
+            label(dc,11,legend_top,width-22,13,legend,muted,false);
         }
 
         let ncols=cols(width);

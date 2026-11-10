@@ -806,7 +806,7 @@ fn render(ui: &QdmWindow, state: &mut ViewState, jobs: &VecModel<DownloadItem>, 
             _ => "Validating transfer".into(),
         });
         ui.set_sha256(task.sha256.clone().unwrap_or_default().into());
-        let rows = task.lanes.iter().take(64).map(|lane| {
+        let rows = task.lanes.iter().take(128).map(|lane| {
             let progress = fraction(lane.current_bytes, lane.current_total);
             let status = if lane.active { "Receiving" } else if (lane.current_total > 0 && lane.current_bytes >= lane.current_total)
                 || (task.status == "completed" && lane.transferred_bytes > 0) { "Done" }

@@ -73,7 +73,7 @@ fn main() {
         .thread_name("qdm-net-diagnostic").enable_all().build().unwrap();
     let failed = runtime.block_on(async {
         let mut builder = Client::builder().connect_timeout(Duration::from_secs(20))
-            .pool_idle_timeout(Duration::from_secs(30)).pool_max_idle_per_host(64)
+            .pool_idle_timeout(Duration::from_secs(30)).pool_max_idle_per_host(128)
             .tcp_keepalive(Duration::from_secs(30)).user_agent(user_agent.clone()).referer(false)
             .no_gzip().no_brotli().no_deflate().no_zstd();
         if http_version == "1" { builder = builder.http1_only(); }

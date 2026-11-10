@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 const HISTORY_LIMIT: usize = 10_000;
 const PART_LIMIT: usize = 4096;
+// Worker slots per download. The public setting is clamped to the same value.
+pub(crate) const MAX_WORKERS: usize = 128;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -157,7 +159,7 @@ struct Task {
     #[serde(skip)]
     adaptive_starting: bool,
     #[serde(skip)]
-    startup_ready_slots: u64,
+    startup_ready_slots: u128,
     #[serde(skip)]
     startup_next_growth: Option<Instant>,
     #[serde(skip)]
@@ -189,17 +191,17 @@ struct PendingOutput {
 impl Task {
     fn ensure_lane_activity(&mut self) {
         if !self.lane_activity.is_empty() {
-            self.lane_activity.resize(64, LaneRecord::default());
+            self.lane_activity.resize(MAX_WORKERS, LaneRecord::default());
             return;
         }
-        let mut slots = vec![LaneRecord::default(); 64];
+        let mut slots = vec![LaneRecord::default(); MAX_WORKERS];
         // Existing installations used raw part IDs as connection IDs; old
         // partial bytes are summarized without inventing historical worker IDs.
         let old_bytes = self.parts.iter().any(|p| p.downloaded > 0);
         self.view.lane_history_estimated = old_bytes;
         if old_bytes {
             for p in &self.parts {
-                let idx = (p.id.saturating_sub(1) as usize) % 64;
+                let idx = (p.id.saturating_sub(1) as usize) % MAX_WORKERS;
                 slots[idx].transferred_bytes = slots[idx].transferred_bytes.saturating_add(p.downloaded);
                 slots[idx].current_bytes = slots[idx].current_bytes.saturating_add(p.downloaded);
                 slots[idx].current_total = slots[idx].current_total.saturating_add(p.len());
@@ -212,7 +214,7 @@ impl Task {
             self.view.downloaded_bytes = self.parts.iter().map(|p| p.downloaded).sum();
         }
         self.view.part_count = self.parts.len() as u32;
-        self.view.connections_active = self.parts.iter().filter(|p| p.active).count().min(128) as u8;
+        self.view.connections_active = self.parts.iter().filter(|p| p.active).count().min(MAX_WORKERS) as u8;
         self.view.peak_connections = self.view.peak_connections.max(self.view.connections_active);
         self.view.segments = self
             .parts
@@ -225,7 +227,7 @@ impl Task {
                 active: p.active,
             })
             .collect();
-        let limit = if self.stream_mode { 1 } else { self.view.connections_limit.clamp(1, 128) as usize };
+        let limit = if self.stream_mode { 1 } else { self.view.connections_limit.clamp(1, MAX_WORKERS as u8) as usize };
         if !self.lane_activity.is_empty() {
             self.view.lanes = (0..limit).map(|index| {
                 let slot = self.lane_activity.get(index).cloned().unwrap_or_default();
