@@ -25,6 +25,16 @@ every possible Windows compositor artifact. The original crate license and
 copyright notices remain in the vendored source. Review the source license
 before redistributing the binary.
 
+## QDM startup-to-tray guard
+
+QDM sets `QDM_STARTUP_TRAY_ONLY` while starting with `--startup-minimized` so
+the main window is created without being mapped for one frame. That guard is
+applied only when the initial native window is created (`ensure_window`). It
+must not be applied in `set_visibility`, because every later explicit
+`show()` — including the transfer/completion notification popup — would then
+stay unmapped for the rest of the session. This was the cause of notifications
+not appearing after QDM autostarted into the tray.
+
 ## Verification
 
 Build with `scripts/build.ps1` (`cargo build --release --locked`).

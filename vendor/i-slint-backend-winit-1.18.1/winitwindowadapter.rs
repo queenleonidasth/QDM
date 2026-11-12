@@ -758,7 +758,13 @@ impl WinitWindowAdapter {
 
         if show_after_creation {
             self.shown.set(WindowVisibility::Hidden);
-            self.set_visibility(WindowVisibility::ShownFirstTime)?;
+            // QDM startup mode: create the initial window without mapping it even
+            // for one frame. Scope this to creation only: suppressing every later
+            // set_visibility() call also kept the notification popup unmapped for
+            // the whole session when QDM started with --startup-minimized.
+            if std::env::var_os("QDM_STARTUP_TRAY_ONLY").is_none() {
+                self.set_visibility(WindowVisibility::ShownFirstTime)?;
+            }
         }
 
         {
@@ -1714,10 +1720,10 @@ impl WinitWindowAdapter {
                 }
             }
 
-            // QDM startup mode: do not map the window even for one frame.
-            if std::env::var_os("QDM_STARTUP_TRAY_ONLY").is_none() {
-                winit_window.set_visible(true);
-            }
+            // QDM startup mode is handled once, when the initial window is
+            // created. Explicitly showing a window (for example the transfer or
+            // completion popup) must always map it.
+            winit_window.set_visible(true);
 
             // X11 and Windows discard what is drawn into a window that isn't mapped,
             // which the buffer age a software surface reports doesn't account for.
